@@ -342,7 +342,8 @@ def run_render(cmd: str, resume_url: str, status_url: str, out_name: str, out_pa
 
 def run_deface(input_path: str, output_path: str, mode: str = "faces"):
     _log(f"deface [{mode}]: {os.path.basename(input_path)}")
-    cmd = ["deface", "-i", input_path, "-o", output_path]
+    backend = os.environ.get("DEFACE_BACKEND", "auto")
+    cmd = ["deface", "-i", input_path, "-o", output_path, "-b", backend]
     if mode == "plates":
         weights = os.environ.get("PLATE_MODEL_PATH", "")
         if weights and os.path.exists(weights):
@@ -351,12 +352,18 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces"):
             _log("Kein Kennzeichen-Modell – Datei wird kopiert.")
             subprocess.run(["cp", "--", input_path, output_path], check=True)
             return
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    for line in proc.stdout:
-        line = line.rstrip()
-        if line:
-            _log(f"  deface: {line}")
-    proc.wait()
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, env=env)
+    try:
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                _log(f"  deface: {line}")
+        proc.wait(timeout=3600)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise RuntimeError("deface Timeout nach 60 Minuten")
     if proc.returncode != 0:
         raise RuntimeError(f"deface Fehler (exit {proc.returncode})")
     _log(f"deface [{mode}] abgeschlossen")
