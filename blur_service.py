@@ -342,8 +342,7 @@ def run_render(cmd: str, resume_url: str, status_url: str, out_name: str, out_pa
 
 def run_deface(input_path: str, output_path: str, mode: str = "faces"):
     _log(f"deface [{mode}]: {os.path.basename(input_path)}")
-    cmd = ["deface", "-i", input_path, "-o", output_path,
-           "--execution-providers", "CUDAExecutionProvider"]
+    cmd = ["deface", "-i", input_path, "-o", output_path, "-b", "onnxrt"]
     if mode == "plates":
         weights = os.environ.get("PLATE_MODEL_PATH", "")
         if weights and os.path.exists(weights):
