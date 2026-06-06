@@ -18,6 +18,8 @@ app = FastAPI(title="BrainCut Blur Service")
 
 # ── Globaler Status ───────────────────────────────────────────────────────────
 _lock = Lock()
+_cancel_flag = False
+
 _status = {
     "state": "idle",
     "operation": "",
@@ -242,6 +244,32 @@ def blur(data: dict, bg: BackgroundTasks):
     return {"status": "queued", "count": len(jobs)}
 
 
+@app.post("/cancel")
+def cancel_job():
+    global _cancel_flag
+    with _lock:
+        _cancel_flag = True
+    _log("⚠️ Abbruch angefordert")
+    return {"status": "cancel_requested"}
+
+
+@app.post("/job-control")
+def job_control(data: dict):
+    global _cancel_flag
+    action = data.get("action", "status")
+    if action == "cancel":
+        with _lock:
+            _cancel_flag = True
+        _log("⚠️ Abbruch angefordert (job-control)")
+        with _lock:
+            return {"action": "cancel", "state": _status.get("state"), "name": _status.get("name", "")}
+    else:
+        with _lock:
+            s = dict(_status)
+        s["action"] = "status"
+        return s
+
+
 @app.post("/render")
 def render(data: dict, bg: BackgroundTasks):
     cmd = data.get("cmd", "")
@@ -326,6 +354,19 @@ def process_jobs(jobs: list, resume_url: str, status_url: str = ""):
 
             _log(f"[{i}/{total}] Fertig: {name}")
             post_status(status_url, {"event": "progress_done", "current": i, "total": total, "name": name})
+        except RuntimeError as exc:
+            if "cancelled" in str(exc).lower():
+                global _cancel_flag
+                with _lock:
+                    _cancel_flag = False
+                _log(f"[{i}/{total}] Job abgebrochen.")
+                errors.append({"input": input_path, "error": "Abgebrochen"})
+                post_status(status_url, {"event": "cancelled", "current": i, "total": total, "name": name})
+                break
+            err = str(exc)
+            _log(f"[{i}/{total}] FEHLER: {err[:300]}")
+            errors.append({"input": input_path, "error": err})
+            post_status(status_url, {"event": "error", "current": i, "total": total, "name": name, "error": err[:500]})
         except Exception as exc:
             err = str(exc)
             _log(f"[{i}/{total}] FEHLER: {err[:300]}")
@@ -463,6 +504,14 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
         ret, frame = cap.read()
         if not ret:
             break
+        with _lock:
+            if _cancel_flag:
+                _log(f"  ⚠️ Abbruch – {frame_idx}/{total_frames} Frames verarbeitet")
+                cap.release()
+                out.release()
+                if os.path.exists(output_path):
+                    os.remove(output_path)
+                raise RuntimeError("cancelled")
         frame_idx += 1
 
         dets, _ = cf(frame, threshold=0.2)
