@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>BrainCutBlur</Name>
+  <Repository>crazydevil35/braincut-blur:latest</Repository>
+  <Registry>https://hub.docker.com/r/crazydevil35/braincut-blur</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/CrazyDevil66/braincut-blur</Support>
+  <Project>https://github.com/CrazyDevil66/braincut-blur</Project>
+  <Overview>Blur-Service für den BrainCut n8n-Workflow. Verpixelt automatisch Gesichter in Videos per POST-API. Wird vom n8n-Workflow aufgerufen und meldet sich per Webhook zurück.</Overview>
+  <Category>Tools: MediaApp:</Category>
+  <TemplateURL>https://raw.githubusercontent.com/CrazyDevil66/braincut-blur/master/unraid-template.xml</TemplateURL>
+  <Icon></Icon>
+  <ExtraParams></ExtraParams>
+  <PostArgs></PostArgs>
+  <CPUset></CPUset>
+  <DonateText></DonateText>
+  <DonateLink></DonateLink>
+
+  <Config
+    Name="API Port"
+    Target="8080"
+    Default="8080"
+    Mode="tcp"
+    Description="Port, über den n8n den Blur-Service erreicht. Muss mit der IP im n8n-Workflow übereinstimmen."
+    Type="Port"
+    Display="always"
+    Required="true"
+    Mask="false">8080</Config>
+
+  <Config
+    Name="BrainCut Ordner"
+    Target="/mnt/user/n8n_automation/BrainCut"
+    Default="/mnt/user/n8n_automation/BrainCut"
+    Mode="rw"
+    Description="Pfad zum BrainCut-Ordner auf Unraid. Muss identisch mit dem Pfad im n8n-Workflow sein (01_input, 02_processing usw.)."
+    Type="Path"
+    Display="always"
+    Required="true"
+    Mask="false">/mnt/user/n8n_automation/BrainCut</Config>
+
+  <Config
+    Name="PLATE_MODEL_PATH"
+    Target="PLATE_MODEL_PATH"
+    Default=""
+    Mode=""
+    Description="Optionaler Pfad zu einer .pt-Modelldatei für Kennzeichen-Erkennung (z.B. /mnt/user/appdata/braincut-blur/plates.pt). Leer lassen wenn nicht benötigt."
+    Type="Variable"
+    Display="always"
+    Required="false"
+    Mask="false"></Config>
+
+</Container>
