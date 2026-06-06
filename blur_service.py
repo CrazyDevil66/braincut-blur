@@ -30,7 +30,7 @@ _status = {
     "logs": [],
 }
 
-def _log(msg: str, level: str = "INFO"):
+def _log(msg: str):
     ts = datetime.now().strftime("%H:%M:%S")
     entry = f"[{ts}] {msg}"
     log.info(msg)
@@ -42,6 +42,29 @@ def _log(msg: str, level: str = "INFO"):
 def _set(**kwargs):
     with _lock:
         _status.update(kwargs)
+
+# ── Startup-Check ─────────────────────────────────────────────────────────────
+def _startup_check():
+    try:
+        import onnxruntime as ort
+        providers = ort.get_available_providers()
+        _log(f"ONNX Runtime verfügbar. Provider: {providers}")
+        if "CUDAExecutionProvider" in providers:
+            _log("GPU: CUDAExecutionProvider aktiv – GPU wird genutzt")
+        else:
+            _log("GPU: CUDA nicht verfügbar – läuft auf CPU (OpenCV-Fallback)")
+    except Exception as exc:
+        _log(f"ONNX-Check fehlgeschlagen: {exc}")
+
+    try:
+        from deface.centerface import CenterFace
+        _log("deface CenterFace-Modell geladen")
+    except Exception as exc:
+        _log(f"deface-Import fehlgeschlagen: {exc}")
+
+@app.on_event("startup")
+async def on_startup():
+    _startup_check()
 
 # ── Web-GUI ───────────────────────────────────────────────────────────────────
 HTML = """<!DOCTYPE html>
@@ -75,7 +98,7 @@ HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1>🎬 BrainCut Blur Service</h1>
+<h1>BrainCut Blur Service</h1>
 
 <div class="card" id="statusCard">
   <div class="row">
@@ -115,15 +138,15 @@ async function refresh() {
 
     if (d.state === 'idle') {
       label.textContent = 'Bereit';
-      sub.textContent = d.error ? '⚠ Letzter Fehler: ' + d.error : 'Warte auf Auftrag...';
+      sub.textContent = d.error ? 'Letzter Fehler: ' + d.error : 'Warte auf Auftrag...';
       wrap.style.display = 'none';
     } else if (d.state === 'blur') {
-      label.textContent = '🔍 Blur läuft – ' + (d.name || '');
-      sub.textContent = `Video ${d.current} von ${d.total}`;
+      label.textContent = 'Blur läuft – ' + (d.name || '');
+      sub.textContent = 'Video ' + d.current + ' von ' + d.total;
       wrap.style.display = 'block';
       bar.style.width = (d.total ? Math.round((d.current / d.total) * 100) : 0) + '%';
     } else if (d.state === 'render') {
-      label.textContent = '⚙️ FFmpeg rendert – ' + (d.out_name || '');
+      label.textContent = 'FFmpeg rendert – ' + (d.out_name || '');
       sub.textContent = d.started_at ? 'Gestartet: ' + d.started_at : '';
       wrap.style.display = 'block';
       bar.style.width = '100%';
@@ -131,14 +154,14 @@ async function refresh() {
 
     const box = document.getElementById('logBox');
     const wasAtBottom = box.scrollHeight - box.clientHeight <= box.scrollTop + 20;
-    box.innerHTML = d.logs.map(l => `<div class="entry">${l}</div>`).join('');
+    box.innerHTML = d.logs.map(l => '<div class="entry">' + l + '</div>').join('');
     if (wasAtBottom) box.scrollTop = box.scrollHeight;
 
     document.getElementById('logCount').textContent = d.logs.length + ' Einträge';
     document.getElementById('refreshTs').textContent =
       'Aktualisiert: ' + new Date().toLocaleTimeString('de-DE');
   } catch(e) {
-    document.getElementById('stateLabel').textContent = '⚠ Verbindung verloren';
+    document.getElementById('stateLabel').textContent = 'Verbindung verloren';
   }
 }
 
@@ -207,7 +230,6 @@ def format_bytes(b: int) -> str:
 
 
 def wakeup_disk(path: str):
-    """Kurzer Lesezugriff damit der Datenträger vor deface aufwacht."""
     try:
         with open(path, "rb") as f:
             f.read(4096)
@@ -272,7 +294,7 @@ def process_jobs(jobs: list, resume_url: str, status_url: str = ""):
     if resume_url:
         try:
             requests.post(resume_url, json={"status": "done", "errors": errors}, timeout=15)
-            _log(f"Blur-Callback gesendet")
+            _log("Blur-Callback gesendet")
         except Exception as exc:
             _log(f"Blur-Callback fehlgeschlagen: {exc}")
 
@@ -340,30 +362,97 @@ def run_render(cmd: str, resume_url: str, status_url: str, out_name: str, out_pa
             requests.post(resume_url, json={"success": False, "error": err, "outName": out_name}, timeout=15)
 
 
+# ── deface: direkt per Python API ────────────────────────────────────────────
 def run_deface(input_path: str, output_path: str, mode: str = "faces"):
-    _log(f"deface [{mode}]: {os.path.basename(input_path)}")
-    backend = os.environ.get("DEFACE_BACKEND", "auto")
-    cmd = ["deface", "-i", input_path, "-o", output_path, "-b", backend]
+    _log(f"deface [{mode}] startet: {os.path.basename(input_path)}")
+
     if mode == "plates":
         weights = os.environ.get("PLATE_MODEL_PATH", "")
-        if weights and os.path.exists(weights):
-            cmd += ["--weights", weights]
-        else:
+        if not (weights and os.path.exists(weights)):
             _log("Kein Kennzeichen-Modell – Datei wird kopiert.")
             subprocess.run(["cp", "--", input_path, output_path], check=True)
             return
-    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, env=env)
+
     try:
-        for line in proc.stdout:
-            line = line.rstrip()
-            if line:
-                _log(f"  deface: {line}")
-        proc.wait(timeout=3600)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        raise RuntimeError("deface Timeout nach 60 Minuten")
-    if proc.returncode != 0:
-        raise RuntimeError(f"deface Fehler (exit {proc.returncode})")
-    _log(f"deface [{mode}] abgeschlossen")
+        import onnxruntime as ort
+        available = ort.get_available_providers()
+        if "CUDAExecutionProvider" in available:
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            _log("deface: nutze GPU (CUDA)")
+        else:
+            providers = ["CPUExecutionProvider"]
+            _log("deface: CUDA nicht verfügbar – nutze CPU")
+    except ImportError:
+        providers = None
+        _log("deface: onnxruntime nicht gefunden – OpenCV-Fallback")
+
+    try:
+        import cv2
+        from deface.centerface import CenterFace
+
+        # Modell initialisieren
+        cf = CenterFace(in_shape=None, backend="onnxrt")
+        if providers is not None:
+            # Provider direkt am ONNX-Session setzen
+            try:
+                cf.sess.set_providers(providers)
+            except Exception:
+                pass
+
+        cap = cv2.VideoCapture(input_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Kann Video nicht öffnen: {input_path}")
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        _log(f"Video: {w}x{h} @ {fps:.1f}fps, {total_frames} Frames")
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        out = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+
+        frame_idx = 0
+        last_log = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame_idx += 1
+
+            dets, _ = cf(frame, threshold=0.2)
+            for x, y, x2, y2, _ in dets:
+                x, y, x2, y2 = int(x), int(y), int(x2), int(y2)
+                roi = frame[y:y2, x:x2]
+                if roi.size > 0:
+                    bw = max(1, (x2 - x) // 10)
+                    bh = max(1, (y2 - y) // 10)
+                    blurred = cv2.resize(cv2.resize(roi, (bw, bh)), (x2 - x, y2 - y))
+                    frame[y:y2, x:x2] = blurred
+
+            out.write(frame)
+
+            if total_frames > 0 and frame_idx - last_log >= max(1, total_frames // 20):
+                pct = round(frame_idx / total_frames * 100)
+                _log(f"  deface: {pct}% ({frame_idx}/{total_frames} Frames)")
+                last_log = frame_idx
+
+        cap.release()
+        out.release()
+
+        # mp4v → h264 re-encodieren damit das Video kompatibel bleibt
+        tmp_out = output_path + ".tmp.mp4"
+        os.rename(output_path, tmp_out)
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", tmp_out, "-c:v", "libx264", "-crf", "18",
+             "-preset", "fast", "-c:a", "copy", output_path],
+            capture_output=True, text=True
+        )
+        os.remove(tmp_out)
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg re-encode Fehler: {result.stderr[-400:]}")
+
+        _log(f"deface [{mode}] abgeschlossen: {frame_idx} Frames verarbeitet")
+
+    except ImportError as exc:
+        raise RuntimeError(f"deface Import fehlgeschlagen: {exc}")

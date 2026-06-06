@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>BrainCutBlur</Name>
-  <Repository>crazydevil35/braincut-blur:latest</Repository>
+  <Repository>crazydevil35/braincut-blur:v2</Repository>
   <Registry>https://hub.docker.com/r/crazydevil35/braincut-blur</Registry>
   <Network>bridge</Network>
   <Shell>sh</Shell>
