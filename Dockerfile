@@ -12,6 +12,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 ENV XDG_CACHE_HOME=/app/.cache
+ENV QT_QPA_PLATFORM=offscreen
 
 # Gesichts-Modell beim Build herunterladen (kein Delay beim ersten Job)
 RUN python -c "from deface.centerface import CenterFace; CenterFace()"
