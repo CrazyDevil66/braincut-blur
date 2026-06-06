@@ -304,6 +304,7 @@ def process_jobs(jobs: list, resume_url: str, status_url: str = ""):
         post_status(status_url, {"event": "progress_start", "current": i, "total": total, "name": name})
 
         wakeup_disk(input_path)
+        detection_resolution = job.get("detection_resolution", "720p")
 
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -311,15 +312,15 @@ def process_jobs(jobs: list, resume_url: str, status_url: str = ""):
                 with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
                     tmp_path = tmp.name
                 try:
-                    run_deface(input_path, tmp_path, mode="faces", status_url=status_url, job_name=name)
-                    run_deface(tmp_path, output_path, mode="plates", status_url=status_url, job_name=name)
+                    run_deface(input_path, tmp_path, mode="faces", status_url=status_url, job_name=name, detection_resolution=detection_resolution)
+                    run_deface(tmp_path, output_path, mode="plates", status_url=status_url, job_name=name, detection_resolution=detection_resolution)
                 finally:
                     if os.path.exists(tmp_path):
                         os.remove(tmp_path)
             elif blur_faces:
-                run_deface(input_path, output_path, mode="faces", status_url=status_url, job_name=name)
+                run_deface(input_path, output_path, mode="faces", status_url=status_url, job_name=name, detection_resolution=detection_resolution)
             elif blur_plates:
-                run_deface(input_path, output_path, mode="plates", status_url=status_url, job_name=name)
+                run_deface(input_path, output_path, mode="plates", status_url=status_url, job_name=name, detection_resolution=detection_resolution)
             else:
                 subprocess.run(["cp", "--", input_path, output_path], check=True)
 
@@ -402,7 +403,8 @@ def run_render(cmd: str, resume_url: str, status_url: str, out_name: str, out_pa
 
 # ── deface: direkt per Python API ────────────────────────────────────────────
 def run_deface(input_path: str, output_path: str, mode: str = "faces",
-               status_url: str = "", job_name: str = ""):
+               status_url: str = "", job_name: str = "",
+               detection_resolution: str = "720p"):
     _log(f"deface [{mode}] startet: {os.path.basename(input_path)}")
 
     if mode == "plates":
@@ -428,7 +430,11 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
     import cv2
     from deface.centerface import CenterFace
 
-    cf = CenterFace(in_shape=None, backend="onnxrt")
+    res_map = {"720p": (1280, 720), "1080p": (1920, 1080), "native": None}
+    in_shape = res_map.get(detection_resolution, (1280, 720))
+    _log(f"deface: Erkennungsauflösung {detection_resolution} → in_shape={in_shape}")
+
+    cf = CenterFace(in_shape=in_shape, backend="onnxrt")
     if providers is not None:
         try:
             cf.sess.set_providers(providers)
