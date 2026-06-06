@@ -11,7 +11,7 @@
   <Overview>Blur-Service für den BrainCut n8n-Workflow. Verpixelt automatisch Gesichter in Videos per POST-API. Wird vom n8n-Workflow aufgerufen und meldet sich per Webhook zurück.</Overview>
   <Category>Tools: MediaApp:</Category>
   <TemplateURL>https://raw.githubusercontent.com/CrazyDevil66/braincut-blur/master/unraid-template.xml</TemplateURL>
-  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <WebUI>http://[IP]:8080/</WebUI>
   <Icon></Icon>
   <ExtraParams>--runtime=nvidia --gpus all</ExtraParams>
   <PostArgs></PostArgs>
