@@ -24,6 +24,10 @@ RUN python -c "import deface; import os; path = os.path.join(os.path.dirname(def
         'dyn_model = onnx.utils.polish_model(dyn_model)', \
         'dyn_model = onnx.shape_inference.infer_shapes(dyn_model)' \
     ); \
+    src = src.replace( \
+        'onnxruntime.InferenceSession(dyn_model.SerializeToString())', \
+        'onnxruntime.InferenceSession(dyn_model.SerializeToString(), providers=[\"CUDAExecutionProvider\", \"CPUExecutionProvider\"])' \
+    ); \
     open(path, 'w').write(src)"
 
 ENV XDG_CACHE_HOME=/app/.cache
