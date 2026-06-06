@@ -12,7 +12,7 @@
   <Category>Tools: MediaApp:</Category>
   <TemplateURL>https://raw.githubusercontent.com/CrazyDevil66/braincut-blur/master/unraid-template.xml</TemplateURL>
   <Icon></Icon>
-  <ExtraParams></ExtraParams>
+  <ExtraParams>--runtime=nvidia --gpus all</ExtraParams>
   <PostArgs></PostArgs>
   <CPUset></CPUset>
   <DonateText></DonateText>
