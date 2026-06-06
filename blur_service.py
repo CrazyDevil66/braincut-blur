@@ -65,7 +65,7 @@ def process_jobs(jobs: list, resume_url: str):
 
 
 def run_deface(input_path: str, output_path: str, mode: str = "faces"):
-    cmd = ["deface", input_path, "-o", output_path]
+    cmd = ["deface", "-i", input_path, "-o", output_path]
     if mode == "plates":
         weights = os.environ.get("PLATE_MODEL_PATH", "")
         if weights and os.path.exists(weights):
