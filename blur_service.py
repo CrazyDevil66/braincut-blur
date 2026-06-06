@@ -21,19 +21,42 @@ def health():
 def blur(data: dict, bg: BackgroundTasks):
     jobs = data.get("jobs", [])
     resume_url = data.get("resumeUrl", "")
+    chat_id = data.get("chatId", "")
+    bot_token = data.get("botToken", "")
     log.info(f"Auftrag empfangen: {len(jobs)} Job(s)")
-    bg.add_task(process_jobs, jobs, resume_url)
+    bg.add_task(process_jobs, jobs, resume_url, chat_id, bot_token)
     return {"status": "queued", "count": len(jobs)}
 
 
-def process_jobs(jobs: list, resume_url: str):
+def send_telegram(bot_token: str, chat_id: str, text: str):
+    if not bot_token or not chat_id:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
+    except Exception as exc:
+        log.warning(f"Telegram-Benachrichtigung fehlgeschlagen: {exc}")
+
+
+def process_jobs(jobs: list, resume_url: str, chat_id: str = "", bot_token: str = ""):
+    total = len(jobs)
     errors = []
-    for job in jobs:
+
+    send_telegram(bot_token, chat_id, f"⏳ Blur gestartet – {total} Video(s) werden verarbeitet...")
+
+    for i, job in enumerate(jobs, 1):
         input_path = job.get("input_path", "")
         output_path = job.get("output_path", "")
         blur_faces = job.get("blur_faces", False)
         blur_plates = job.get("blur_plates", False)
+        name = os.path.basename(input_path)
         log.info(f"{input_path} → {output_path} (faces={blur_faces}, plates={blur_plates})")
+
+        send_telegram(bot_token, chat_id, f"🔍 Verarbeite {i}/{total}: {name}")
+
         try:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             if blur_faces and blur_plates:
@@ -52,9 +75,16 @@ def process_jobs(jobs: list, resume_url: str):
             else:
                 subprocess.run(["cp", "--", input_path, output_path], check=True)
             log.info(f"Fertig: {output_path}")
+            send_telegram(bot_token, chat_id, f"✅ {i}/{total} fertig: {name}")
         except Exception as exc:
             log.error(f"Fehler bei {input_path}: {exc}")
             errors.append({"input": input_path, "error": str(exc)})
+            send_telegram(bot_token, chat_id, f"❌ Fehler bei {name}:\n{str(exc)[:300]}")
+
+    if errors:
+        send_telegram(bot_token, chat_id, f"⚠️ Blur abgeschlossen mit {len(errors)} Fehler(n). FFmpeg wird trotzdem gestartet.")
+    else:
+        send_telegram(bot_token, chat_id, f"✅ Alle {total} Video(s) erfolgreich verpixelt. FFmpeg wird gestartet...")
 
     if resume_url:
         try:
