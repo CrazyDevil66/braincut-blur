@@ -12,7 +12,7 @@
   <Category>Tools: MediaApp:</Category>
   <TemplateURL>https://raw.githubusercontent.com/CrazyDevil66/braincut-blur/main/unraid-template.xml</TemplateURL>
   <WebUI>http://[IP]:8080/</WebUI>
-  <Icon></Icon>
+  <Icon>https://raw.githubusercontent.com/CrazyDevil66/braincut-blur/main/icon.svg</Icon>
   <ExtraParams>--runtime=nvidia --gpus all</ExtraParams>
   <PostArgs></PostArgs>
   <CPUset></CPUset>
