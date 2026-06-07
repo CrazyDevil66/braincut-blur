@@ -1,9 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Maintainer>
-  <Profile>
-    BrainCut Blur Service – automatisches Verpixeln von Gesichtern in Videos.
-    Teil der BrainCut n8n-Automatisierungspipeline mit Telegram-Steuerung.
-    Wird vom n8n-Workflow per HTTP aufgerufen und meldet sich per Webhook zurück.
-  </Profile>
+<CommunityApplications>
+  <Profile>Blur service for the BrainCut n8n workflow. Automatically blurs faces and license plates in videos via REST API. Part of the BrainCut automation pipeline with Telegram control.</Profile>
+  <Icon>https://raw.githubusercontent.com/CrazyDevil66/braincut-blur/main/icon.svg</Icon>
   <WebPage>https://github.com/CrazyDevil66/braincut-blur</WebPage>
-</Maintainer>
+</CommunityApplications>
