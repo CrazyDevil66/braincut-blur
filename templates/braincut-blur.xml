@@ -1,0 +1,22 @@
+<Container version="2">
+  <Name>BrainCut-Blur</Name>
+  <Repository>crazydevil35/braincut-blur:latest</Repository>
+  <Registry>https://hub.docker.com/r/crazydevil35/braincut-blur</Registry>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Icon>https://raw.githubusercontent.com/CrazyDevil66/braincut-blur/main/icon.png</Icon>
+  <WebUI>http://[IP]:[PORT:8080]</WebUI>
+  <Overview>Blur service for the BrainCut n8n workflow. Automatically blurs faces and license plates in videos via REST API. Called by the n8n workflow and reports back via webhook when done.</Overview>
+  <Support>https://github.com/CrazyDevil66/braincut-blur/issues</Support>
+  <Project>https://github.com/CrazyDevil66/braincut-blur</Project>
+  <TemplateURL>https://raw.githubusercontent.com/CrazyDevil66/braincut-blur/main/templates/braincut-blur.xml</TemplateURL>
+  <Category>Tools:Utilities</Category>
+  <ExtraParams>--runtime=nvidia --gpus all</ExtraParams>
+  <Date>2026-06-07</Date>
+  <License>MIT</License>
+  <Config Name="API Port" Target="8080" Default="8080" Mode="tcp" Description="Port used by n8n to reach the blur service." Type="Port" Display="always" Required="true" Mask="false"/>
+  <Config Name="BrainCut Folder" Target="/data" Default="/mnt/user/n8n_automation/BrainCut" Mode="rw" Description="BrainCut working folder on Unraid." Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="N8N-Server IP" Target="N8N_SERVER_IP" Default="192.168.1.x" Mode="" Description="IP address of your n8n server. The webhook URL is built automatically." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="PLATE_MODEL_PATH" Target="PLATE_MODEL_PATH" Default="" Mode="" Description="Optional path to a .pt model file for license plate detection. Leave empty if not needed." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+</Container>
