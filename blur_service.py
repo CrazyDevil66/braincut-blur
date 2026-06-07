@@ -314,6 +314,7 @@ def wakeup_disk(path: str):
 def process_jobs(jobs: list, resume_url: str, status_url: str = ""):
     total = len(jobs)
     errors = []
+    was_cancelled = False
 
     _set(state="blur", current=0, total=total, error="",
          frame_current=0, frame_total=0, frame_pct=0, eta_seconds=0,
@@ -363,6 +364,7 @@ def process_jobs(jobs: list, resume_url: str, status_url: str = ""):
                 _log(f"[{i}/{total}] Job abgebrochen.")
                 errors.append({"input": input_path, "error": "Abgebrochen"})
                 post_status(status_url, {"event": "cancelled", "current": i, "total": total, "name": name})
+                was_cancelled = True
                 break
             err = str(exc)
             _log(f"[{i}/{total}] FEHLER: {err[:300]}")
@@ -386,7 +388,7 @@ def process_jobs(jobs: list, resume_url: str, status_url: str = ""):
         except Exception as exc:
             _log(f"Blur-Callback fehlgeschlagen: {exc}")
 
-    if COMPLETION_WEBHOOK:
+    if COMPLETION_WEBHOOK and not was_cancelled:
         try:
             requests.post(COMPLETION_WEBHOOK, json={"status": "done", "errors": errors}, timeout=10)
             _log("Completion-Webhook gesendet")
