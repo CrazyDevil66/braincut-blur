@@ -12,7 +12,6 @@
   <Project>https://github.com/CrazyDevil66/braincut-blur</Project>
   <TemplateURL>https://raw.githubusercontent.com/CrazyDevil66/braincut-blur/main/templates/braincut-blur.xml</TemplateURL>
   <Category>Tools:Utilities</Category>
-  <ExtraParams>--runtime=nvidia --gpus all</ExtraParams>
   <Date>2026-06-07</Date>
   <License>MIT</License>
   <Config Name="API Port" Target="8080" Default="8080" Mode="tcp" Description="Port used by n8n to reach the blur service." Type="Port" Display="always" Required="true" Mask="false"/>
