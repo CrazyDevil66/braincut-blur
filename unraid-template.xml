@@ -42,6 +42,17 @@
     Mask="false">/mnt/user/n8n_automation/BrainCut</Config>
 
   <Config
+    Name="N8N Completion Webhook"
+    Target="N8N_COMPLETION_WEBHOOK"
+    Default="http://192.168.1.x:5678/webhook/blur-done"
+    Mode=""
+    Description="URL des n8n-Webhooks, der nach Abschluss aller Blur-Jobs aufgerufen wird. Format: http://[n8n-IP]:5678/webhook/blur-done"
+    Type="Variable"
+    Display="always"
+    Required="true"
+    Mask="false"></Config>
+
+  <Config
     Name="PLATE_MODEL_PATH"
     Target="PLATE_MODEL_PATH"
     Default=""
