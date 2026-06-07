@@ -43,11 +43,11 @@
     Mask="false">/mnt/user/n8n_automation/BrainCut</Config>
 
   <Config
-    Name="N8N Completion Webhook"
-    Target="N8N_COMPLETION_WEBHOOK"
-    Default="http://192.168.1.x:5678/webhook/blur-done"
+    Name="N8N-Server IP"
+    Target="N8N_SERVER_IP"
+    Default="192.168.1.x"
     Mode=""
-    Description="URL of the n8n webhook called after all blur jobs complete. Format: http://[n8n-IP]:5678/webhook/blur-done"
+    Description="IP address of your n8n server (e.g. 192.168.1.100). The webhook URL is built automatically."
     Type="Variable"
     Display="always"
     Required="true"

@@ -19,7 +19,8 @@ app = FastAPI(title="BrainCut Blur Service")
 # ── Globaler Status ───────────────────────────────────────────────────────────
 _lock = Lock()
 _cancel_flag = False
-COMPLETION_WEBHOOK = os.getenv("N8N_COMPLETION_WEBHOOK", "")
+_n8n_ip = os.getenv("N8N_SERVER_IP", "")
+COMPLETION_WEBHOOK = f"http://{_n8n_ip}:5678/webhook/blur-done" if _n8n_ip else ""
 
 _status = {
     "state": "idle",
