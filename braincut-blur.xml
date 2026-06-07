@@ -12,7 +12,7 @@
   <Overview>Blur service for the BrainCut n8n workflow. Automatically blurs faces and license plates in videos via REST API. Called by the n8n workflow and reports back via webhook when done.</Overview>
   <Category>Tools:Utilities</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
-  <TemplateURL>https://raw.githubusercontent.com/CrazyDevil66/braincut-blur/main/templates/braincut-blur.xml</TemplateURL>
+  <TemplateURL>https://raw.githubusercontent.com/CrazyDevil66/braincut-blur/main/braincut-blur.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/CrazyDevil66/braincut-blur/main/icon.svg</Icon>
   <ExtraParams>--runtime=nvidia --gpus all</ExtraParams>
   <PostArgs></PostArgs>
