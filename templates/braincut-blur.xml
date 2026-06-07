@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Container version="2">
-  <Name>BrainCutBlur</Name>
+  <Name>BrainCut-Blur</Name>
   <Repository>crazydevil35/braincut-blur:latest</Repository>
   <Registry>https://hub.docker.com/r/crazydevil35/braincut-blur</Registry>
   <Network>bridge</Network>
