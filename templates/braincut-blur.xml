@@ -14,6 +14,7 @@
   <Category>Tools:Utilities</Category>
   <Date>2026-06-07</Date>
   <License>MIT</License>
+  <ExtraParams></ExtraParams>
   <Config Name="API Port" Target="8080" Default="8080" Mode="tcp" Description="Port used by n8n to reach the blur service." Type="Port" Display="always" Required="true" Mask="false"/>
   <Config Name="BrainCut Folder" Target="/data" Default="/mnt/user/n8n_automation/BrainCut" Mode="rw" Description="BrainCut working folder on Unraid." Type="Path" Display="always" Required="true" Mask="false"/>
   <Config Name="N8N-Server IP" Target="N8N_SERVER_IP" Default="192.168.1.x" Mode="" Description="IP address of your n8n server. The webhook URL is built automatically." Type="Variable" Display="always" Required="true" Mask="false"/>
