@@ -19,6 +19,7 @@ app = FastAPI(title="BrainCut Blur Service")
 # ── Globaler Status ───────────────────────────────────────────────────────────
 _lock = Lock()
 _cancel_flag = False
+COMPLETION_WEBHOOK = os.getenv("N8N_COMPLETION_WEBHOOK", "")
 
 _status = {
     "state": "idle",
@@ -384,6 +385,13 @@ def process_jobs(jobs: list, resume_url: str, status_url: str = ""):
             _log("Blur-Callback gesendet")
         except Exception as exc:
             _log(f"Blur-Callback fehlgeschlagen: {exc}")
+
+    if COMPLETION_WEBHOOK:
+        try:
+            requests.post(COMPLETION_WEBHOOK, json={"status": "done", "errors": errors}, timeout=10)
+            _log("Completion-Webhook gesendet")
+        except Exception as exc:
+            _log(f"Completion-Webhook fehlgeschlagen: {exc}")
 
 
 # ── Render-Verarbeitung ───────────────────────────────────────────────────────
