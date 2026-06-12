@@ -32,7 +32,7 @@ RUN python -c "import deface; import os; path = os.path.join(os.path.dirname(def
     open(path, 'w').write(src)"
 
 ENV TZ=Europe/Berlin
-ENV XDG_CACHE_HOME=/app/.cache
+ENV XDG_CACHE_HOME=/app/deface_cache
 ENV QT_QPA_PLATFORM=offscreen
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility

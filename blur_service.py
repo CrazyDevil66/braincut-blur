@@ -1050,8 +1050,8 @@ def wakeup_disk(path: str):
 
 
 # ── YOLOv8 ONNX Inferenz ──────────────────────────────────────────────────────
-def _yolov8_detect(sess, frame, conf_thresh: float = 0.5) -> list:
-    """YOLOv8 ONNX Detection. Gibt [(x1,y1,x2,y2), ...] zurück."""
+def _yolov8_detect(sess, frame, conf_thresh: float = 0.5, aspect_filter: bool = False) -> list:
+    """YOLOv8/YOLOv11 ONNX Detection. Gibt [(x1,y1,x2,y2), ...] zurück."""
     import cv2
     h_orig, w_orig = frame.shape[:2]
     inp = sess.get_inputs()[0]
@@ -1087,8 +1087,15 @@ def _yolov8_detect(sess, frame, conf_thresh: float = 0.5) -> list:
         y2 = int((cy + bh / 2) / in_h * h_orig)
         x1, y1 = max(0, x1), max(0, y1)
         x2, y2 = min(w_orig, x2), min(h_orig, y2)
-        if x2 > x1 and y2 > y1:
-            boxes.append((x1, y1, x2, y2, score))
+        if x2 <= x1 or y2 <= y1:
+            continue
+        if aspect_filter:
+            wb, hb = x2 - x1, y2 - y1
+            if hb == 0 or wb < 20 or hb < 8:
+                continue
+            if not (1.5 <= wb / hb <= 7.0):
+                continue
+        boxes.append((x1, y1, x2, y2, score))
 
     # NMS
     boxes.sort(key=lambda b: b[4], reverse=True)
@@ -1143,14 +1150,7 @@ def process_jobs(jobs: list, resume_url: str, status_url: str = ""):
             try:
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
                 if blur_faces and blur_plates:
-                    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-                        tmp_path = tmp.name
-                    try:
-                        run_deface(input_path, tmp_path, mode="faces", status_url=status_url, job_name=name, detection_resolution=detection_resolution)
-                        run_deface(tmp_path, output_path, mode="plates", status_url=status_url, job_name=name, detection_resolution=detection_resolution)
-                    finally:
-                        if os.path.exists(tmp_path):
-                            os.remove(tmp_path)
+                    run_deface(input_path, output_path, mode="both", status_url=status_url, job_name=name, detection_resolution=detection_resolution)
                 elif blur_faces:
                     run_deface(input_path, output_path, mode="faces", status_url=status_url, job_name=name, detection_resolution=detection_resolution)
                 elif blur_plates:
@@ -1211,17 +1211,28 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
     # ── Modell-Konfiguration laden ────────────────────────────────────────────
     cfg = _load_model_config()
 
-    if mode == "plates":
+    # ── Kennzeichen-Modell prüfen ─────────────────────────────────────────────
+    plate_model_id = None
+    plate_model_file = None
+    if mode in ("plates", "both"):
         plate_model_id = cfg.get("plate_model")
         if not plate_model_id:
-            _log("Kein Kennzeichen-Modell aktiv – Datei wird kopiert.")
-            subprocess.run(["cp", "--", input_path, output_path], check=True)
-            return
-        plate_model_file = _MODELS_PATH / f"{plate_model_id}.onnx"
-        if not plate_model_file.exists():
-            _log(f"Kennzeichen-Modell nicht gefunden ({plate_model_id}) – Datei wird kopiert.")
-            subprocess.run(["cp", "--", input_path, output_path], check=True)
-            return
+            if mode == "plates":
+                _log("Kein Kennzeichen-Modell aktiv – Datei wird kopiert.")
+                subprocess.run(["cp", "--", input_path, output_path], check=True)
+                return
+            else:
+                _log("Kein Kennzeichen-Modell aktiv – nur Gesichter werden verarbeitet.")
+        else:
+            plate_model_file = _MODELS_PATH / f"{plate_model_id}.onnx"
+            if not plate_model_file.exists():
+                if mode == "plates":
+                    _log(f"Kennzeichen-Modell nicht gefunden ({plate_model_id}) – Datei wird kopiert.")
+                    subprocess.run(["cp", "--", input_path, output_path], check=True)
+                    return
+                else:
+                    _log(f"Kennzeichen-Modell nicht gefunden ({plate_model_id}) – nur Gesichter.")
+                    plate_model_file = None
 
     _log(f"deface [{mode}] startet: {os.path.basename(input_path)}")
 
@@ -1258,53 +1269,60 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     _log(f"Video: {w}x{h} @ {fps:.1f}fps, {total_frames} Frames")
 
-    # ── Detektor aufbauen ─────────────────────────────────────────────────────
-    use_yolov8 = False
+    # ── Gesichts-Detektor aufbauen ────────────────────────────────────────────
     cf = None
-    yolo_sess = None
-
-    if mode == "faces":
+    face_yolo_sess = None
+    if mode in ("faces", "both"):
         face_model_id = cfg.get("face_model", "builtin-centerface")
         if face_model_id == "builtin-centerface":
             res_map = {"720p": (720, 1280), "1080p": (1080, 1920)}
             in_shape = (h, w) if detection_resolution == "native" else res_map.get(detection_resolution, (720, 1280))
-            _log(f"deface: CenterFace, Erkennungsauflösung {detection_resolution} → in_shape={in_shape}")
-            cf = CenterFace(in_shape=in_shape, backend="onnxrt")
+            _log(f"deface: CenterFace, in_shape={in_shape}")
             try:
+                cf = CenterFace(in_shape=in_shape, backend="onnxrt")
                 cf.sess.set_providers(providers)
             except Exception as exc:
-                _log(f"Provider-Warnung: {exc}")
+                _log(f"CenterFace Ladefehler: {exc}")
+                cf = None
         else:
             model_path = str(_MODELS_PATH / f"{face_model_id}.onnx")
             if not os.path.exists(model_path):
                 _log(f"Gesichts-Modell nicht gefunden ({face_model_id}) – Fallback auf CenterFace")
                 res_map = {"720p": (720, 1280), "1080p": (1080, 1920)}
                 in_shape = res_map.get(detection_resolution, (720, 1280))
-                cf = CenterFace(in_shape=in_shape, backend="onnxrt")
                 try:
+                    cf = CenterFace(in_shape=in_shape, backend="onnxrt")
                     cf.sess.set_providers(providers)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log(f"CenterFace Fallback Ladefehler: {exc}")
+                    cf = None
             else:
                 try:
-                    yolo_sess = ort.InferenceSession(model_path, providers=providers)
-                    use_yolov8 = True
+                    face_yolo_sess = ort.InferenceSession(model_path, providers=providers)
                     _log(f"deface: YOLOv8 Gesichts-Modell geladen: {face_model_id}")
                 except Exception as exc:
                     _log(f"Gesichts-Modell Ladefehler: {exc} – Fallback auf CenterFace")
                     res_map = {"720p": (720, 1280), "1080p": (1080, 1920)}
                     in_shape = res_map.get(detection_resolution, (720, 1280))
-                    cf = CenterFace(in_shape=in_shape, backend="onnxrt")
-    else:  # plates
+                    try:
+                        cf = CenterFace(in_shape=in_shape, backend="onnxrt")
+                        cf.sess.set_providers(providers)
+                    except Exception as exc2:
+                        _log(f"CenterFace Fallback Ladefehler: {exc2}")
+                        cf = None
+
+    # ── Kennzeichen-Detektor aufbauen ─────────────────────────────────────────
+    plate_yolo_sess = None
+    if mode in ("plates", "both") and plate_model_file:
         try:
-            yolo_sess = ort.InferenceSession(str(plate_model_file), providers=providers)
-            use_yolov8 = True
+            plate_yolo_sess = ort.InferenceSession(str(plate_model_file), providers=providers)
             _log(f"deface: Kennzeichen-Modell geladen: {plate_model_id}")
         except Exception as exc:
-            _log(f"Kennzeichen-Modell Ladefehler: {exc} – Datei wird kopiert")
-            cap.release()
-            subprocess.run(["cp", "--", input_path, output_path], check=True)
-            return
+            _log(f"Kennzeichen-Modell Ladefehler: {exc}")
+            if mode == "plates":
+                cap.release()
+                subprocess.run(["cp", "--", input_path, output_path], check=True)
+                return
 
     # ── Video Reader/Writer ───────────────────────────────────────────────────
     read_q: queue.Queue = queue.Queue(maxsize=_FRAME_BUFFER)
@@ -1348,6 +1366,8 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
     last_log_time = 0.0
     last_milestone = 0
     cancelled = False
+    _PLATE_TTL = 5
+    plate_buffer: dict = {}  # key → (box, ttl) für temporale Stabilisierung
 
     try:
         while True:
@@ -1362,19 +1382,39 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
 
             frame_idx += 1
 
-            # ── Detektion ──────────────────────────────────────────────────
-            if use_yolov8:
-                dets = _yolov8_detect(yolo_sess, frame)
-            else:
-                try:
-                    result = cf(frame, threshold=0.2)
-                    raw = result[0] if (result is not None and result[0] is not None) else []
-                    dets = [(int(x), int(y), int(x2), int(y2)) for x, y, x2, y2, _ in raw]
-                except Exception:
-                    dets = []
+            # ── Gesichts-Detektion ─────────────────────────────────────────
+            face_dets: list = []
+            if mode in ("faces", "both"):
+                if face_yolo_sess is not None:
+                    face_dets = _yolov8_detect(face_yolo_sess, frame)
+                elif cf is not None:
+                    try:
+                        result = cf(frame, threshold=0.2)
+                        raw = result[0] if (result is not None and result[0] is not None) else []
+                        face_dets = [(int(x), int(y), int(x2), int(y2)) for x, y, x2, y2, _ in raw]
+                    except Exception as exc:
+                        _log(f"CenterFace Fehler Frame {frame_idx}: {exc}")
+
+            # ── Kennzeichen-Detektion mit temporalem Buffer ────────────────
+            plate_dets: list = []
+            if mode in ("plates", "both") and plate_yolo_sess is not None:
+                raw_plates = _yolov8_detect(plate_yolo_sess, frame, aspect_filter=True)
+                new_keys: set = set()
+                for box in raw_plates:
+                    key = (box[0] // 30, box[1] // 30, box[2] // 30, box[3] // 30)
+                    plate_buffer[key] = (box, _PLATE_TTL)
+                    new_keys.add(key)
+                for k in list(plate_buffer):
+                    if k not in new_keys:
+                        box, ttl = plate_buffer[k]
+                        if ttl <= 1:
+                            del plate_buffer[k]
+                        else:
+                            plate_buffer[k] = (box, ttl - 1)
+                plate_dets = [box for box, _ in plate_buffer.values()]
 
             # ── Blur anwenden ──────────────────────────────────────────────
-            for x, y, x2, y2 in dets:
+            for x, y, x2, y2 in face_dets + plate_dets:
                 roi = frame[y:y2, x:x2]
                 if roi.size > 0:
                     bw = max(1, (x2 - x) // 10)
