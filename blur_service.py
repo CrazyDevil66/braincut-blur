@@ -63,13 +63,13 @@ _BUILTIN_CATALOG: dict = {
         },
         {
             "id": "yolov8n-plates-eu",
-            "name": "YOLOv8n Kennzeichen (schnell)",
+            "name": "YOLOv11n Kennzeichen (schnell)",
             "type": "plate",
             "format": "yolov8",
             "builtin": False,
-            "url": "https://huggingface.co/ml-debi/yolov8-license-plate-detection/resolve/main/best.onnx",
-            "size_mb": 12.2,
-            "description": "YOLOv8 Kennzeichenerkennung – schnell, GPU-optimiert. (ml-debi, MIT)",
+            "url": "https://huggingface.co/morsetechlab/yolov11-license-plate-detection/resolve/main/license-plate-finetune-v1n.onnx",
+            "size_mb": 10.5,
+            "description": "YOLOv11n Kennzeichenerkennung – schnell, GPU-optimiert. (morsetechlab, MIT)",
         },
         {
             "id": "yolov8s-plates-eu",
@@ -1050,7 +1050,7 @@ def wakeup_disk(path: str):
 
 
 # ── YOLOv8 ONNX Inferenz ──────────────────────────────────────────────────────
-def _yolov8_detect(sess, frame, conf_thresh: float = 0.3) -> list:
+def _yolov8_detect(sess, frame, conf_thresh: float = 0.5) -> list:
     """YOLOv8 ONNX Detection. Gibt [(x1,y1,x2,y2), ...] zurück."""
     import cv2
     h_orig, w_orig = frame.shape[:2]
