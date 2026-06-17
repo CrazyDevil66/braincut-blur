@@ -934,6 +934,33 @@ def cancel_job():
     return {"status": "cancel_requested"}
 
 
+@app.post("/run-shell")
+def run_shell(data: dict):
+    """FFmpeg-Kommando im Container ausführen (ersetzt N8N SSH-Node)."""
+    cmd = data.get("cmd", "").strip()
+    if not cmd:
+        return {"stdout": "", "stderr": "Kein Befehl angegeben", "exitCode": 1}
+    cmd_remapped = cmd.replace(_media_host_path, _CONTAINER_ROOT)
+    _log(f"Shell-Befehl gestartet ({len(cmd_remapped)} Zeichen)")
+    try:
+        result = subprocess.run(
+            ["bash", "-c", cmd_remapped],
+            capture_output=True, text=True, timeout=3600
+        )
+        _log(f"Shell-Befehl beendet: exitCode={result.returncode}")
+        if result.returncode != 0:
+            _log(f"stderr: {result.stderr[-500:]}")
+        return {
+            "stdout": result.stdout,
+            "stderr": result.stderr[-2000:] if result.stderr else "",
+            "exitCode": result.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        return {"stdout": "", "stderr": "Timeout nach 3600s", "exitCode": 1}
+    except Exception as exc:
+        return {"stdout": "", "stderr": str(exc)[:500], "exitCode": 1}
+
+
 @app.post("/job-control")
 def job_control(data: dict):
     global _cancel_flag
@@ -1412,7 +1439,17 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                     try:
                         result = cf(frame, threshold=0.1)
                         raw = result[0] if (result is not None and result[0] is not None) else []
-                        face_dets = [(int(x), int(y), int(x2), int(y2)) for x, y, x2, y2, _ in raw]
+                        expanded = []
+                        for x, y, x2, y2, _ in raw:
+                            ex = max(2, int((x2 - x) * 0.30))
+                            ey = max(2, int((y2 - y) * 0.30))
+                            expanded.append((
+                                max(0, int(x) - ex), max(0, int(y) - ey),
+                                min(w - 1, int(x2) + ex), min(h - 1, int(y2) + ey)
+                            ))
+                        face_dets = expanded
+                        if face_dets and total_face_detections < 5:
+                            _log(f"Gesicht Frame {frame_idx}: {face_dets[0]} (Framegröße: {w}x{h})")
                     except Exception as exc:
                         _log(f"CenterFace Fehler Frame {frame_idx}: {exc}")
 
