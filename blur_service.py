@@ -919,8 +919,9 @@ def blur(data: dict, bg: BackgroundTasks):
     jobs = data.get("jobs", [])
     resume_url = data.get("resumeUrl", "")
     status_url = data.get("statusUrl", "")
+    full_job = data.get("fullJob", {})
     _log(f"Blur-Auftrag empfangen: {len(jobs)} Job(s)")
-    bg.add_task(process_jobs, jobs, resume_url, status_url)
+    bg.add_task(process_jobs, jobs, resume_url, status_url, full_job)
     return {"status": "queued", "count": len(jobs)}
 
 
@@ -1119,7 +1120,7 @@ def _yolov8_detect(sess, frame, conf_thresh: float = 0.5, aspect_filter: bool = 
 
 
 # ── Blur-Verarbeitung ─────────────────────────────────────────────────────────
-def process_jobs(jobs: list, resume_url: str, status_url: str = ""):
+def process_jobs(jobs: list, resume_url: str, status_url: str = "", full_job: dict = None):
     status_url = _fix_status_url(status_url)
     total = len(jobs)
     errors = []
@@ -1194,8 +1195,11 @@ def process_jobs(jobs: list, resume_url: str, status_url: str = ""):
 
         if COMPLETION_WEBHOOK and not was_cancelled:
             try:
-                requests.post(COMPLETION_WEBHOOK, json={"status": "done", "errors": errors}, timeout=10)
-                _log("Completion-Webhook gesendet")
+                payload = {"status": "done", "errors": errors}
+                if full_job:
+                    payload["fullJob"] = full_job
+                requests.post(COMPLETION_WEBHOOK, json=payload, timeout=10)
+                _log(f"Completion-Webhook gesendet (fullJob={'ja' if full_job else 'nein'})")
             except Exception as exc:
                 _log(f"Completion-Webhook fehlgeschlagen: {exc}")
 
@@ -1207,13 +1211,18 @@ _PLATE_GRID = 50
 
 
 def _load_centerface(in_shape: tuple, providers: list):
-    """CenterFace laden und GPU-Provider setzen ohne Annahmen über interne Attribute."""
     from deface.centerface import CenterFace
     try:
         cf = CenterFace(in_shape=in_shape)
-    except TypeError:
-        cf = CenterFace()
-    # Provider setzen – Attributname variiert je nach deface-Version
+        _log(f"CenterFace geladen mit in_shape={in_shape}")
+    except Exception as e1:
+        _log(f"CenterFace(in_shape) fehlgeschlagen ({e1}), versuche CenterFace() ohne Argumente")
+        try:
+            cf = CenterFace()
+            _log("CenterFace ohne in_shape geladen")
+        except Exception as e2:
+            _log(f"CenterFace komplett fehlgeschlagen: {e2}")
+            raise RuntimeError(f"CenterFace konnte nicht geladen werden: {e2}") from e2
     for attr in ("centerface", "sess", "session", "ort_session"):
         sess = getattr(cf, attr, None)
         if hasattr(sess, "set_providers"):
@@ -1225,7 +1234,6 @@ def _load_centerface(in_shape: tuple, providers: list):
             break
     else:
         _log("CenterFace: kein Session-Attribut gefunden – läuft auf Standard-Provider")
-    _log(f"CenterFace geladen (in_shape={in_shape})")
     return cf
 
 
@@ -1378,7 +1386,9 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
     last_milestone = 0
     cancelled = False
     _PLATE_TTL = 15
-    plate_buffer: dict = {}  # key → (box, ttl) für temporale Stabilisierung
+    plate_buffer: dict = {}
+    total_face_detections = 0
+    total_plate_detections = 0
 
     try:
         while True:
@@ -1400,7 +1410,7 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                     face_dets = _yolov8_detect(face_yolo_sess, frame)
                 elif cf is not None:
                     try:
-                        result = cf(frame, threshold=0.2)
+                        result = cf(frame, threshold=0.1)
                         raw = result[0] if (result is not None and result[0] is not None) else []
                         face_dets = [(int(x), int(y), int(x2), int(y2)) for x, y, x2, y2, _ in raw]
                     except Exception as exc:
@@ -1423,6 +1433,9 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                         else:
                             plate_buffer[k] = (box, ttl - 1)
                 plate_dets = [box for box, _ in plate_buffer.values()]
+
+            total_face_detections += len(face_dets)
+            total_plate_detections += len(plate_dets)
 
             # ── Blur anwenden ──────────────────────────────────────────────
             for x, y, x2, y2 in face_dets + plate_dets:
@@ -1476,6 +1489,11 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                     "eta_human": "unbekannt",
                 })
     finally:
+        _log(f"Detektion-Zusammenfassung: {total_face_detections} Gesichts-Erkennungen, "
+             f"{total_plate_detections} Kennzeichen-Erkennungen über {frame_idx} Frames "
+             f"(Modus: {mode})")
+        if mode in ("faces", "both") and total_face_detections == 0:
+            _log("WARNUNG: Kein Gesicht erkannt! CenterFace evtl. fehlerhaft geladen oder Video enthält keine Gesichter.")
         write_q.put(None)
         t_read.join(timeout=10)
         t_write.join(timeout=30)
