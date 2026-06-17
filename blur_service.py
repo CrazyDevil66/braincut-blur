@@ -1416,6 +1416,8 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
     plate_buffer: dict = {}
     total_face_detections = 0
     total_plate_detections = 0
+    face_bbox_sample: list = []   # (frame_idx, x, y, x2, y2)
+    face_bbox_areas: list = []    # (x2-x)*(y2-y) für Statistik
 
     try:
         while True:
@@ -1448,8 +1450,11 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                                 min(w - 1, int(x2) + ex), min(h - 1, int(y2) + ey)
                             ))
                         face_dets = expanded
-                        if face_dets and total_face_detections < 5:
-                            _log(f"Gesicht Frame {frame_idx}: {face_dets[0]} (Framegröße: {w}x{h})")
+                        if face_dets:
+                            if len(face_bbox_sample) < 3:
+                                face_bbox_sample.append((frame_idx, *face_dets[0]))
+                            for fx, fy, fx2, fy2 in face_dets:
+                                face_bbox_areas.append((fx2 - fx) * (fy2 - fy))
                     except Exception as exc:
                         _log(f"CenterFace Fehler Frame {frame_idx}: {exc}")
 
@@ -1529,8 +1534,18 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
         _log(f"Detektion-Zusammenfassung: {total_face_detections} Gesichts-Erkennungen, "
              f"{total_plate_detections} Kennzeichen-Erkennungen über {frame_idx} Frames "
              f"(Modus: {mode})")
-        if mode in ("faces", "both") and total_face_detections == 0:
-            _log("WARNUNG: Kein Gesicht erkannt! CenterFace evtl. fehlerhaft geladen oder Video enthält keine Gesichter.")
+        if mode in ("faces", "both"):
+            if total_face_detections == 0:
+                _log("WARNUNG: Kein Gesicht erkannt! CenterFace evtl. fehlerhaft geladen.")
+            else:
+                if face_bbox_areas:
+                    avg_a = sum(face_bbox_areas) / len(face_bbox_areas)
+                    min_a = min(face_bbox_areas)
+                    max_a = max(face_bbox_areas)
+                    _log(f"Gesicht BBox-Fläche: min={min_a}px² avg={avg_a:.0f}px² max={max_a}px² (Framegröße: {w}x{h}={w*h}px²)")
+                for s in face_bbox_sample:
+                    fi, fx, fy, fx2, fy2 = s
+                    _log(f"Gesicht Beispiel Frame {fi}: ({fx},{fy})-({fx2},{fy2}) → {fx2-fx}x{fy2-fy}px")
         write_q.put(None)
         t_read.join(timeout=10)
         t_write.join(timeout=30)
