@@ -1202,6 +1202,32 @@ def process_jobs(jobs: list, resume_url: str, status_url: str = ""):
 
 # ── deface: direkt per Python API ────────────────────────────────────────────
 _FRAME_BUFFER = 32
+_PLATE_CONF_THRESH = 0.35
+_PLATE_GRID = 50
+
+
+def _load_centerface(in_shape: tuple, providers: list):
+    """CenterFace laden und GPU-Provider setzen ohne Annahmen über interne Attribute."""
+    from deface.centerface import CenterFace
+    try:
+        cf = CenterFace(in_shape=in_shape)
+    except TypeError:
+        cf = CenterFace()
+    # Provider setzen – Attributname variiert je nach deface-Version
+    for attr in ("centerface", "sess", "session", "ort_session"):
+        sess = getattr(cf, attr, None)
+        if hasattr(sess, "set_providers"):
+            try:
+                sess.set_providers(providers)
+                _log(f"CenterFace GPU-Provider gesetzt über cf.{attr}")
+            except Exception as exc:
+                _log(f"CenterFace Provider-Setzen fehlgeschlagen (cf.{attr}): {exc}")
+            break
+    else:
+        _log("CenterFace: kein Session-Attribut gefunden – läuft auf Standard-Provider")
+    _log(f"CenterFace geladen (in_shape={in_shape})")
+    return cf
+
 
 def run_deface(input_path: str, output_path: str, mode: str = "faces",
                status_url: str = "", job_name: str = "",
@@ -1278,24 +1304,14 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
             res_map = {"720p": (720, 1280), "1080p": (1080, 1920)}
             in_shape = (h, w) if detection_resolution == "native" else res_map.get(detection_resolution, (720, 1280))
             _log(f"deface: CenterFace, in_shape={in_shape}")
-            try:
-                cf = CenterFace(in_shape=in_shape, backend="onnxrt")
-                cf.sess.set_providers(providers)
-            except Exception as exc:
-                _log(f"CenterFace Ladefehler: {exc}")
-                cf = None
+            cf = _load_centerface(in_shape, providers)
         else:
             model_path = str(_MODELS_PATH / f"{face_model_id}.onnx")
             if not os.path.exists(model_path):
                 _log(f"Gesichts-Modell nicht gefunden ({face_model_id}) – Fallback auf CenterFace")
                 res_map = {"720p": (720, 1280), "1080p": (1080, 1920)}
                 in_shape = res_map.get(detection_resolution, (720, 1280))
-                try:
-                    cf = CenterFace(in_shape=in_shape, backend="onnxrt")
-                    cf.sess.set_providers(providers)
-                except Exception as exc:
-                    _log(f"CenterFace Fallback Ladefehler: {exc}")
-                    cf = None
+                cf = _load_centerface(in_shape, providers)
             else:
                 try:
                     face_yolo_sess = ort.InferenceSession(model_path, providers=providers)
@@ -1304,12 +1320,7 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                     _log(f"Gesichts-Modell Ladefehler: {exc} – Fallback auf CenterFace")
                     res_map = {"720p": (720, 1280), "1080p": (1080, 1920)}
                     in_shape = res_map.get(detection_resolution, (720, 1280))
-                    try:
-                        cf = CenterFace(in_shape=in_shape, backend="onnxrt")
-                        cf.sess.set_providers(providers)
-                    except Exception as exc2:
-                        _log(f"CenterFace Fallback Ladefehler: {exc2}")
-                        cf = None
+                    cf = _load_centerface(in_shape, providers)
 
     # ── Kennzeichen-Detektor aufbauen ─────────────────────────────────────────
     plate_yolo_sess = None
@@ -1366,7 +1377,7 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
     last_log_time = 0.0
     last_milestone = 0
     cancelled = False
-    _PLATE_TTL = 5
+    _PLATE_TTL = 15
     plate_buffer: dict = {}  # key → (box, ttl) für temporale Stabilisierung
 
     try:
@@ -1398,10 +1409,10 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
             # ── Kennzeichen-Detektion mit temporalem Buffer ────────────────
             plate_dets: list = []
             if mode in ("plates", "both") and plate_yolo_sess is not None:
-                raw_plates = _yolov8_detect(plate_yolo_sess, frame, aspect_filter=True)
+                raw_plates = _yolov8_detect(plate_yolo_sess, frame, conf_thresh=_PLATE_CONF_THRESH, aspect_filter=True)
                 new_keys: set = set()
                 for box in raw_plates:
-                    key = (box[0] // 30, box[1] // 30, box[2] // 30, box[3] // 30)
+                    key = (box[0] // _PLATE_GRID, box[1] // _PLATE_GRID, box[2] // _PLATE_GRID, box[3] // _PLATE_GRID)
                     plate_buffer[key] = (box, _PLATE_TTL)
                     new_keys.add(key)
                 for k in list(plate_buffer):
