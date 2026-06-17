@@ -1233,8 +1233,8 @@ def process_jobs(jobs: list, resume_url: str, status_url: str = "", full_job: di
 
 # ── deface: direkt per Python API ────────────────────────────────────────────
 _FRAME_BUFFER = 32
-_PLATE_CONF_THRESH = 0.35
-_PLATE_GRID = 50
+_PLATE_CONF_THRESH = 0.45
+_PLATE_GRID = 30
 
 
 def _load_centerface(in_shape: tuple, providers: list):
@@ -1412,7 +1412,7 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
     last_log_time = 0.0
     last_milestone = 0
     cancelled = False
-    _PLATE_TTL = 15
+    _PLATE_TTL = 10
     plate_buffer: dict = {}
     total_face_detections = 0
     total_plate_detections = 0
@@ -1480,13 +1480,26 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
             total_plate_detections += len(plate_dets)
 
             # ── Blur anwenden ──────────────────────────────────────────────
-            for x, y, x2, y2 in face_dets + plate_dets:
+            # Gesichter: Gaussian-Blur (stark, auch auf kleinen Regionen sichtbar)
+            for x, y, x2, y2 in face_dets:
+                rw, rh = x2 - x, y2 - y
+                if rw < 4 or rh < 4:
+                    continue
+                roi = frame[y:y2, x:x2]
+                if roi.size == 0:
+                    continue
+                ksize = max(15, (rw // 3) | 1)   # ungerade Kernelgröße, mind. 15
+                frame[y:y2, x:x2] = cv2.GaussianBlur(roi, (ksize, ksize), 0)
+
+            # Kennzeichen: Pixelation (schneller, für klare Rechtecke)
+            for x, y, x2, y2 in plate_dets:
                 roi = frame[y:y2, x:x2]
                 if roi.size > 0:
                     bw = max(1, (x2 - x) // 10)
                     bh = max(1, (y2 - y) // 10)
-                    blurred = cv2.resize(cv2.resize(roi, (bw, bh)), (x2 - x, y2 - y))
-                    frame[y:y2, x:x2] = blurred
+                    frame[y:y2, x:x2] = cv2.resize(
+                        cv2.resize(roi, (bw, bh)), (x2 - x, y2 - y)
+                    )
 
             write_q.put(frame)
 
@@ -1564,7 +1577,8 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
 
     # ── mp4v → H.264 Re-Encode (NVENC / libx264) ─────────────────────────────
     _set(state="render", out_name=os.path.basename(output_path))
-    _log("Re-encode startet...")
+    raw_size_mb = os.path.getsize(output_path) / 1_048_576 if os.path.exists(output_path) else 0
+    _log(f"Re-encode startet... (OpenCV-Rohvideo: {raw_size_mb:.1f} MB)")
     tmp_out = output_path + ".tmp.mp4"
     os.rename(output_path, tmp_out)
     result = subprocess.run(
