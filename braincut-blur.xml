@@ -1,0 +1,67 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>braincut-blur</Name>
+  <Repository>crazydevil35/braincut-blur:latest</Repository>
+  <Registry>https://registry.hub.docker.com/r/crazydevil35/braincut-blur/</Registry>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Overview>BrainCut Blur Service – automatische Gesichts- und Kennzeichenunschärfe für N8N-Workflows.</Overview>
+  <WebUI>http://[IP]:[PORT:8080]/docs</WebUI>
+  <ExtraParams>--gpus all</ExtraParams>
+
+  <Config Name="WebUI Port"
+          Target="8080"
+          Default="8080"
+          Mode="tcp"
+          Description="HTTP API Port des Blur Service"
+          Type="Port"
+          Display="always"
+          Required="true"
+          Mask="false">8080</Config>
+
+  <Config Name="BrainCut Videodaten"
+          Target="/data"
+          Default="/mnt/user/n8n_automation/BrainCut"
+          Description="Unraid-Pfad zum BrainCut-Ordner (Videomaterial)"
+          Type="Path"
+          Display="always"
+          Required="true"
+          Mask="false">/mnt/user/n8n_automation/BrainCut</Config>
+
+  <Config Name="App-Daten"
+          Target="/app/.cache"
+          Default="/mnt/user/appdata/braincut-blur"
+          Description="Container-Cache: TensorRT-Engine, Modelle. Wird beim ersten Start automatisch angelegt."
+          Type="Path"
+          Display="always"
+          Required="true"
+          Mask="false">/mnt/user/appdata/braincut-blur</Config>
+
+  <Config Name="N8N Server IP"
+          Target="N8N_SERVER_IP"
+          Default=""
+          Description="IP:Port des N8N-Servers, z.B. 192.168.1.100:5678 (für Callback-URLs)"
+          Type="Variable"
+          Display="always"
+          Required="false"
+          Mask="false"></Config>
+
+  <Config Name="Media Host Pfad"
+          Target="MEDIA_HOST_PATH"
+          Default="/mnt/user/n8n_automation/BrainCut"
+          Description="Unraid-Pfad der Videodaten – wird intern auf /data umgeschrieben"
+          Type="Variable"
+          Display="always"
+          Required="true"
+          Mask="false">/mnt/user/n8n_automation/BrainCut</Config>
+
+  <Config Name="Modell-Katalog URL"
+          Target="MODEL_CATALOG_URL"
+          Default=""
+          Description="URL zu einer JSON-Datei mit verfügbaren Modellen (optional). Leer = integrierter Katalog wird genutzt."
+          Type="Variable"
+          Display="always"
+          Required="false"
+          Mask="false"></Config>
+</Container>
