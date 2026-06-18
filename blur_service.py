@@ -1351,16 +1351,21 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
         import onnxruntime as ort
         available = ort.get_available_providers()
         if "TensorrtExecutionProvider" in available:
-            providers = ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
-            _log("deface: nutze TensorRT (schnellste Inferenz)")
+            # TRT nur für YOLO (feste Input-Shapes) – CenterFace braucht dynamische Shapes
+            providers_yolo = ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
+            providers_face = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            _log("deface: YOLO→TensorRT, CenterFace→CUDA (TRT unterstützt keine dyn. Shapes)")
         elif "CUDAExecutionProvider" in available:
-            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            providers_yolo = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            providers_face = ["CUDAExecutionProvider", "CPUExecutionProvider"]
             _log("deface: nutze GPU (CUDA)")
         else:
-            providers = ["CPUExecutionProvider"]
+            providers_yolo = ["CPUExecutionProvider"]
+            providers_face = ["CPUExecutionProvider"]
             _log("deface: CUDA nicht verfügbar – nutze CPU")
     except ImportError:
-        providers = ["CPUExecutionProvider"]
+        providers_yolo = ["CPUExecutionProvider"]
+        providers_face = ["CPUExecutionProvider"]
         _log("deface: onnxruntime nicht gefunden – nutze CPU")
 
     import cv2
@@ -1374,27 +1379,27 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
             res_map = {"720p": (720, 1280), "1080p": (1080, 1920)}
             in_shape = (h, w) if detection_resolution == "native" else res_map.get(detection_resolution, (720, 1280))
             _log(f"deface: CenterFace, in_shape={in_shape}")
-            cf = _load_centerface(in_shape, providers)
+            cf = _load_centerface(in_shape, providers_face)
         else:
             model_path = str(_MODELS_PATH / f"{face_model_id}.onnx")
             if not os.path.exists(model_path):
                 _log(f"Gesichts-Modell nicht gefunden ({face_model_id}) – Fallback auf CenterFace")
                 in_shape = {"720p": (720, 1280), "1080p": (1080, 1920)}.get(detection_resolution, (720, 1280))
-                cf = _load_centerface(in_shape, providers)
+                cf = _load_centerface(in_shape, providers_face)
             else:
                 try:
-                    face_yolo_sess = ort.InferenceSession(model_path, providers=providers)
+                    face_yolo_sess = ort.InferenceSession(model_path, providers=providers_yolo)
                     _log(f"deface: YOLOv8 Gesichts-Modell geladen: {face_model_id}")
                 except Exception as exc:
                     _log(f"Gesichts-Modell Ladefehler: {exc} – Fallback auf CenterFace")
                     in_shape = {"720p": (720, 1280), "1080p": (1080, 1920)}.get(detection_resolution, (720, 1280))
-                    cf = _load_centerface(in_shape, providers)
+                    cf = _load_centerface(in_shape, providers_face)
 
     # ── Kennzeichen-Detektor ──────────────────────────────────────────────────
     plate_yolo_sess = None
     if mode in ("plates", "both") and plate_model_file:
         try:
-            plate_yolo_sess = ort.InferenceSession(str(plate_model_file), providers=providers)
+            plate_yolo_sess = ort.InferenceSession(str(plate_model_file), providers=providers_yolo)
             _log(f"deface: Kennzeichen-Modell geladen: {plate_model_id}")
         except Exception as exc:
             _log(f"Kennzeichen-Modell Ladefehler: {exc}")
