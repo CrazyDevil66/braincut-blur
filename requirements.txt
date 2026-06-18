@@ -4,3 +4,4 @@ deface==0.3.0
 onnxruntime-gpu
 onnx
 requests==2.31.0
+av

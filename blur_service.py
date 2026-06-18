@@ -1325,26 +1325,18 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
             "Prüfe ob das Volume im Docker-Container korrekt gemountet ist."
         )
 
-    # ── Video-Eigenschaften via ffprobe ───────────────────────────────────────
-    probe = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", input_path],
-        capture_output=True, text=True, timeout=30,
-    )
-    if probe.returncode != 0 or not probe.stdout.strip():
-        raise RuntimeError(f"ffprobe fehlgeschlagen: {input_path}")
-    vs = next(
-        (s for s in json.loads(probe.stdout).get("streams", []) if s.get("codec_type") == "video"),
-        None,
-    )
-    if not vs:
-        raise RuntimeError(f"Kein Video-Stream gefunden: {input_path}")
-    w = int(vs["width"])
-    h = int(vs["height"])
-    fps_parts = vs.get("avg_frame_rate", "25/1").split("/")
-    fps_num = int(fps_parts[0])
-    fps_den = int(fps_parts[1]) if len(fps_parts) > 1 and int(fps_parts[1]) > 0 else 1
-    fps = fps_num / fps_den
-    total_frames = int(vs.get("nb_frames", 0))
+    # ── Video-Eigenschaften via PyAV ──────────────────────────────────────────
+    import av as _av
+    in_container = _av.open(input_path)
+    in_vs = in_container.streams.video[0]
+    in_vs.codec_context.thread_count = 0  # libavcodec wählt Thread-Anzahl automatisch
+    w = in_vs.width
+    h = in_vs.height
+    fps_rate = in_vs.average_rate  # Fraction (z.B. 100/1)
+    fps = float(fps_rate)
+    total_frames = in_vs.frames or 0
+    if not total_frames and in_vs.duration and fps > 0:
+        total_frames = int(float(in_vs.duration) * float(in_vs.time_base) * fps)
     _log(f"Video: {w}x{h} @ {fps:.1f}fps, {total_frames} Frames")
 
     # ── ONNX Runtime ──────────────────────────────────────────────────────────
@@ -1408,65 +1400,32 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                 subprocess.run(["cp", "--", input_path, output_path], check=True)
                 return
 
-    # ── Hardware-Beschleunigung ermitteln ─────────────────────────────────────
-    use_nvdec = _check_nvdec()
-    use_nvenc = _check_nvenc()
-    _log(f"Hardware: NVDEC={'ja' if use_nvdec else 'nein'}, NVENC={'ja' if use_nvenc else 'nein'}")
-
-    frame_size = w * h * 3  # BGR24 Bytes pro Frame
-
+    # ── PyAV Ausgabe-Container ────────────────────────────────────────────────
     wakeup_disk(input_path)
-
-    # ── ffmpeg Decoder (NVDEC oder CPU) ───────────────────────────────────────
-    hwaccel_args = ["-hwaccel", "cuda"] if use_nvdec else []
-    decode_cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
-        *hwaccel_args, "-i", input_path,
-        "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
-    ]
-
-    # ── ffmpeg Encoder (NVENC oder libx264) ───────────────────────────────────
-    if use_nvenc:
-        vcodec_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "18"]
-        codec_label = "NVDEC+NVENC" if use_nvdec else "NVENC"
-    else:
-        vcodec_args = ["-c:v", "libx264", "-crf", "18", "-preset", "fast"]
-        codec_label = "CPU"
-
     tmp_output = output_path + ".enc.tmp.mp4"
-    encode_cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-f", "rawvideo", "-pix_fmt", "bgr24",
-        "-s", f"{w}x{h}", "-r", f"{fps_num}/{fps_den}",
-        "-i", "pipe:0",
-        "-i", input_path,
-        "-map", "0:v:0", "-map", "1:a?",
-        *vcodec_args, "-c:a", "copy",
-        tmp_output,
-    ]
+    out_container = _av.open(tmp_output, 'w')
 
-    dec_proc = subprocess.Popen(
-        decode_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        bufsize=frame_size * 4,
-    )
-    enc_proc = subprocess.Popen(
-        encode_cmd,
-        stdin=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=frame_size * 4,
-    )
+    use_nvenc = False
+    try:
+        out_video = out_container.add_stream('h264_nvenc', rate=fps_rate)
+        out_video.options = {'preset': 'p4', 'cq': '18'}
+        use_nvenc = True
+    except Exception:
+        out_video = out_container.add_stream('libx264', rate=fps_rate)
+        out_video.options = {'crf': '18', 'preset': 'fast'}
+    out_video.width = w
+    out_video.height = h
+    out_video.pix_fmt = 'yuv420p'
+    codec_label = "PyAV+NVENC" if use_nvenc else "PyAV+libx264"
+    _log(f"Hardware: PyAV-Decoder (multithreaded CPU), NVENC={'ja' if use_nvenc else 'nein'}")
 
-    # stderr-Drainer damit der Encoder-Pipe-Buffer nicht blockiert
-    enc_stderr_lines: list = []
-
-    def _drain_enc_stderr():
-        for line in iter(enc_proc.stderr.readline, b""):
-            enc_stderr_lines.append(line.decode("utf-8", errors="replace").rstrip())
-
-    t_enc_err = threading.Thread(target=_drain_enc_stderr, daemon=True)
-    t_enc_err.start()
+    in_audio_streams = list(in_container.streams.audio)
+    out_audio = None
+    if in_audio_streams:
+        try:
+            out_audio = out_container.add_stream(template=in_audio_streams[0])
+        except Exception:
+            pass
 
     frame_idx = 0
     start_time = time.time()
@@ -1509,18 +1468,24 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
         def _plate_callable(f, _s=plate_yolo_sess):
             return _yolov8_detect(_s, f, conf_thresh=_PLATE_CONF_THRESH, aspect_filter=True)
 
-    try:
-        while True:
-            raw_bytes = dec_proc.stdout.read(frame_size)
-            if len(raw_bytes) < frame_size:
-                break
+    def _iter_decoded():
+        for _pkt in in_container.demux():
+            if _pkt.stream.type == 'audio' and out_audio is not None:
+                _pkt.stream = out_audio
+                out_container.mux(_pkt)
+                continue
+            if _pkt.stream.type != 'video':
+                continue
+            for _avf in _pkt.decode():
+                yield _avf.to_ndarray(format='bgr24'), _avf
 
+    try:
+        for frame, _av_frame in _iter_decoded():
             with _lock:
                 if _cancel_flag:
                     cancelled = True
                     break
 
-            frame = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((h, w, 3)).copy()
             frame_idx += 1
             should_detect = (frame_idx % _DETECTION_INTERVAL == 1)
 
@@ -1592,7 +1557,11 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                         cv2.resize(roi, (bw, bh)), (x2 - x, y2 - y)
                     )
 
-            enc_proc.stdin.write(frame.tobytes())
+            _out_frame = _av.VideoFrame.from_ndarray(frame, format='bgr24')
+            _out_frame.pts = _av_frame.pts if _av_frame.pts is not None else frame_idx - 1
+            _out_frame.time_base = in_vs.time_base
+            for _enc_pkt in out_video.encode(_out_frame):
+                out_container.mux(_enc_pkt)
 
             now = time.time()
             elapsed = now - start_time
@@ -1644,16 +1613,21 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                     fi, fx, fy, fx2, fy2 = s
                     _log(f"Gesicht Beispiel Frame {fi}: ({fx},{fy})-({fx2},{fy2}) → {fx2 - fx}x{fy2 - fy}px")
 
-        # Encoder flushen und warten
+        # Encoder flushen und Container schließen
         _set(state="render", out_name=os.path.basename(output_path))
         try:
-            enc_proc.stdin.close()
+            for _enc_pkt in out_video.encode(None):
+                out_container.mux(_enc_pkt)
         except Exception:
             pass
-        enc_proc.wait(timeout=300)
-        t_enc_err.join(timeout=5)
-        dec_proc.stdout.close()
-        dec_proc.wait(timeout=30)
+        try:
+            out_container.close()
+        except Exception:
+            pass
+        try:
+            in_container.close()
+        except Exception:
+            pass
         _set(state="blur")
 
     if cancelled:
@@ -1664,11 +1638,8 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
             os.remove(tmp_output)
         raise RuntimeError("cancelled")
 
-    if enc_proc.returncode != 0:
-        err_text = "\n".join(enc_stderr_lines[-20:]) if enc_stderr_lines else "(keine Fehlerausgabe)"
-        if os.path.exists(tmp_output):
-            os.remove(tmp_output)
-        raise RuntimeError(f"Encoder fehlgeschlagen (code={enc_proc.returncode}): {err_text[:500]}")
+    if not os.path.exists(tmp_output) or os.path.getsize(tmp_output) < 1024:
+        raise RuntimeError(f"Encoder fehlgeschlagen: Ausgabedatei fehlt oder leer ({tmp_output})")
 
     if os.path.exists(output_path):
         os.remove(output_path)
