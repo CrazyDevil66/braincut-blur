@@ -1350,7 +1350,10 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
     try:
         import onnxruntime as ort
         available = ort.get_available_providers()
-        if "CUDAExecutionProvider" in available:
+        if "TensorrtExecutionProvider" in available:
+            providers = ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
+            _log("deface: nutze TensorRT (schnellste Inferenz)")
+        elif "CUDAExecutionProvider" in available:
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
             _log("deface: nutze GPU (CUDA)")
         else:
