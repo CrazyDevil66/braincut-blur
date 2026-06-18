@@ -1204,6 +1204,15 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
         total_frames = int(float(in_vs.duration) * float(in_vs.time_base) * fps)
     _log(f"Video: {w}x{h} @ {fps:.1f}fps, {total_frames} Frames")
 
+    # Rotation aus Stream-Metadaten lesen (z.B. DJI Dashcam: rotate=180)
+    _rotation = int(in_vs.metadata.get('rotate', 0) or 0)
+    if _rotation not in (0, 90, 180, 270):
+        _rotation = 0
+    if _rotation != 0:
+        _log(f"Video-Rotation erkannt: {_rotation}° – Frames werden korrigiert")
+        if _rotation in (90, 270):
+            w, h = h, w
+
     # ── ONNX Runtime ──────────────────────────────────────────────────────────
     try:
         import onnxruntime as ort
@@ -1352,6 +1361,13 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                 if _cancel_flag:
                     cancelled = True
                     break
+
+            if _rotation == 180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
+            elif _rotation == 90:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            elif _rotation == 270:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
             frame_idx += 1
             should_detect = (frame_idx % _det_interval == 1)
