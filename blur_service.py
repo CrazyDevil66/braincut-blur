@@ -1235,6 +1235,7 @@ def process_jobs(jobs: list, resume_url: str, status_url: str = "", full_job: di
 _FRAME_BUFFER = 32
 _PLATE_CONF_THRESH = 0.45
 _PLATE_GRID = 30
+_DETECTION_INTERVAL = 4
 
 
 def _load_centerface(in_shape: tuple, providers: list):
@@ -1478,6 +1479,35 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
     total_plate_detections = 0
     face_bbox_sample: list = []
     face_bbox_areas: list = []
+    last_face_dets: list = []
+
+    from concurrent.futures import ThreadPoolExecutor
+    _executor = ThreadPoolExecutor(max_workers=2)
+
+    # Einmalig Callables erzeugen (nicht pro Frame neu)
+    _face_callable = None
+    if mode in ("faces", "both"):
+        if face_yolo_sess is not None:
+            def _face_callable(f, _s=face_yolo_sess):
+                return _yolov8_detect(_s, f)
+        elif cf is not None:
+            def _face_callable(f, _cf=cf, _fw=w, _fh=h):
+                result = _cf(f, threshold=0.1)
+                raw_dets = result[0] if (result is not None and result[0] is not None) else []
+                expanded = []
+                for dx, dy, dx2, dy2, _ in raw_dets:
+                    ex = max(2, int((dx2 - dx) * 0.30))
+                    ey = max(2, int((dy2 - dy) * 0.30))
+                    expanded.append((
+                        max(0, int(dx) - ex), max(0, int(dy) - ey),
+                        min(_fw - 1, int(dx2) + ex), min(_fh - 1, int(dy2) + ey)
+                    ))
+                return expanded
+
+    _plate_callable = None
+    if mode in ("plates", "both") and plate_yolo_sess is not None:
+        def _plate_callable(f, _s=plate_yolo_sess):
+            return _yolov8_detect(_s, f, conf_thresh=_PLATE_CONF_THRESH, aspect_filter=True)
 
     try:
         while True:
@@ -1492,55 +1522,52 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
 
             frame = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((h, w, 3)).copy()
             frame_idx += 1
+            should_detect = (frame_idx % _DETECTION_INTERVAL == 1)
 
-            # ── Gesichts-Detektion ─────────────────────────────────────────
+            # ── Parallele Detektion mit Frame-Skip ────────────────────────
+            face_future = None
+            plate_future = None
+            if should_detect:
+                if _face_callable is not None:
+                    face_future = _executor.submit(_face_callable, frame)
+                if _plate_callable is not None:
+                    plate_future = _executor.submit(_plate_callable, frame)
+
+            # Gesichts-Ergebnisse sammeln
             face_dets: list = []
-            if mode in ("faces", "both"):
-                if face_yolo_sess is not None:
-                    face_dets = _yolov8_detect(face_yolo_sess, frame)
-                elif cf is not None:
-                    try:
-                        result = cf(frame, threshold=0.1)
-                        raw_dets = result[0] if (result is not None and result[0] is not None) else []
-                        expanded = []
-                        for x, y, x2, y2, _ in raw_dets:
-                            ex = max(2, int((x2 - x) * 0.30))
-                            ey = max(2, int((y2 - y) * 0.30))
-                            expanded.append((
-                                max(0, int(x) - ex), max(0, int(y) - ey),
-                                min(w - 1, int(x2) + ex), min(h - 1, int(y2) + ey)
-                            ))
-                        face_dets = expanded
-                        if face_dets:
-                            if len(face_bbox_sample) < 3:
-                                face_bbox_sample.append((frame_idx, *face_dets[0]))
-                            for fx, fy, fx2, fy2 in face_dets:
-                                face_bbox_areas.append((fx2 - fx) * (fy2 - fy))
-                    except Exception as exc:
-                        _log(f"CenterFace Fehler Frame {frame_idx}: {exc}")
+            if face_future is not None:
+                try:
+                    face_dets = face_future.result()
+                    if face_dets:
+                        if len(face_bbox_sample) < 3:
+                            face_bbox_sample.append((frame_idx, *face_dets[0]))
+                        for fx, fy, fx2, fy2 in face_dets:
+                            face_bbox_areas.append((fx2 - fx) * (fy2 - fy))
+                except Exception as exc:
+                    _log(f"CenterFace Fehler Frame {frame_idx}: {exc}")
+                last_face_dets = face_dets
+            else:
+                face_dets = last_face_dets
 
-            # ── Kennzeichen-Detektion mit temporalem Buffer ────────────────
-            plate_dets: list = []
-            if mode in ("plates", "both") and plate_yolo_sess is not None:
-                raw_plates = _yolov8_detect(
-                    plate_yolo_sess, frame, conf_thresh=_PLATE_CONF_THRESH, aspect_filter=True
-                )
-                new_keys: set = set()
+            # Kennzeichen TTL-Verfall (jeden Frame) + neue Ergebnisse
+            for k in list(plate_buffer):
+                box, ttl = plate_buffer[k]
+                if ttl <= 1:
+                    del plate_buffer[k]
+                else:
+                    plate_buffer[k] = (box, ttl - 1)
+            if plate_future is not None:
+                try:
+                    raw_plates = plate_future.result()
+                except Exception:
+                    raw_plates = []
                 for box in raw_plates:
                     key = (
                         box[0] // _PLATE_GRID, box[1] // _PLATE_GRID,
                         box[2] // _PLATE_GRID, box[3] // _PLATE_GRID,
                     )
                     plate_buffer[key] = (box, _PLATE_TTL)
-                    new_keys.add(key)
-                for k in list(plate_buffer):
-                    if k not in new_keys:
-                        box, ttl = plate_buffer[k]
-                        if ttl <= 1:
-                            del plate_buffer[k]
-                        else:
-                            plate_buffer[k] = (box, ttl - 1)
-                plate_dets = [box for box, _ in plate_buffer.values()]
+            plate_dets: list = [box for box, _ in plate_buffer.values()]
 
             total_face_detections += len(face_dets)
             total_plate_detections += len(plate_dets)
@@ -1595,6 +1622,7 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                 last_log_time = now
 
     finally:
+        _executor.shutdown(wait=False)
         _log(
             f"Detektion-Zusammenfassung: {total_face_detections} Gesichts-Erkennungen, "
             f"{total_plate_detections} Kennzeichen-Erkennungen über {frame_idx} Frames "
