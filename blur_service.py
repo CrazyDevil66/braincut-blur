@@ -1325,11 +1325,21 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
             "Prüfe ob das Volume im Docker-Container korrekt gemountet ist."
         )
 
-    # ── Video-Eigenschaften via PyAV ──────────────────────────────────────────
+    # ── Video-Eigenschaften + Decoder via PyAV ───────────────────────────────
     import av as _av
-    in_container = _av.open(input_path)
+
+    # NVDEC (h264_cuvid) versuchen, sonst CPU-Multithreading
+    use_nvdec = False
+    try:
+        _av.codec.Codec('h264_cuvid', 'r')
+        in_container = _av.open(input_path, options={'video_codec': 'h264_cuvid'})
+        use_nvdec = True
+    except Exception:
+        in_container = _av.open(input_path)
+
     in_vs = in_container.streams.video[0]
-    in_vs.codec_context.thread_count = 0  # libavcodec wählt Thread-Anzahl automatisch
+    if not use_nvdec:
+        in_vs.codec_context.thread_count = 0
     w = in_vs.width
     h = in_vs.height
     fps_rate = in_vs.average_rate  # Fraction (z.B. 100/1)
@@ -1417,7 +1427,7 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
     out_video.height = h
     out_video.pix_fmt = 'yuv420p'
     codec_label = "PyAV+NVENC" if use_nvenc else "PyAV+libx264"
-    _log(f"Hardware: PyAV-Decoder (multithreaded CPU), NVENC={'ja' if use_nvenc else 'nein'}")
+    _log(f"Hardware: PyAV-Decoder ({'NVDEC/h264_cuvid' if use_nvdec else 'CPU multithreaded'}), NVENC={'ja' if use_nvenc else 'nein'}")
 
     in_audio_streams = list(in_container.streams.audio)
     out_audio = None
