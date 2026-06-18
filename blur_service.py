@@ -1488,7 +1488,7 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                 roi = frame[y:y2, x:x2]
                 if roi.size == 0:
                     continue
-                ksize = max(15, (rw // 3) | 1)   # ungerade Kernelgröße, mind. 15
+                ksize = max(31, (rw // 2) | 1)   # mind. 31px – bei 4K sonst kaum sichtbar
                 frame[y:y2, x:x2] = cv2.GaussianBlur(roi, (ksize, ksize), 0)
 
             # Kennzeichen: Pixelation (schneller, für klare Rechtecke)
