@@ -1264,12 +1264,33 @@ def _load_centerface(in_shape: tuple, providers: list):
     return cf
 
 
+def _check_nvdec() -> bool:
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-hwaccels"],
+            capture_output=True, text=True, timeout=5
+        )
+        return "cuda" in r.stdout
+    except Exception:
+        return False
+
+
+def _check_nvenc() -> bool:
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=5
+        )
+        return "h264_nvenc" in r.stdout
+    except Exception:
+        return False
+
+
 def run_deface(input_path: str, output_path: str, mode: str = "faces",
                status_url: str = "", job_name: str = "",
                detection_resolution: str = "720p"):
     global _cancel_flag
 
-    # ── Modell-Konfiguration laden ────────────────────────────────────────────
     cfg = _load_model_config()
 
     # ── Kennzeichen-Modell prüfen ─────────────────────────────────────────────
@@ -1297,6 +1318,34 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
 
     _log(f"deface [{mode}] startet: {os.path.basename(input_path)}")
 
+    if not os.path.exists(input_path):
+        raise RuntimeError(
+            f"Datei nicht gefunden: {input_path}\n"
+            "Prüfe ob das Volume im Docker-Container korrekt gemountet ist."
+        )
+
+    # ── Video-Eigenschaften via ffprobe ───────────────────────────────────────
+    probe = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", input_path],
+        capture_output=True, text=True, timeout=30,
+    )
+    if probe.returncode != 0 or not probe.stdout.strip():
+        raise RuntimeError(f"ffprobe fehlgeschlagen: {input_path}")
+    vs = next(
+        (s for s in json.loads(probe.stdout).get("streams", []) if s.get("codec_type") == "video"),
+        None,
+    )
+    if not vs:
+        raise RuntimeError(f"Kein Video-Stream gefunden: {input_path}")
+    w = int(vs["width"])
+    h = int(vs["height"])
+    fps_parts = vs.get("avg_frame_rate", "25/1").split("/")
+    fps_num = int(fps_parts[0])
+    fps_den = int(fps_parts[1]) if len(fps_parts) > 1 and int(fps_parts[1]) > 0 else 1
+    fps = fps_num / fps_den
+    total_frames = int(vs.get("nb_frames", 0))
+    _log(f"Video: {w}x{h} @ {fps:.1f}fps, {total_frames} Frames")
+
     # ── ONNX Runtime ──────────────────────────────────────────────────────────
     try:
         import onnxruntime as ort
@@ -1312,25 +1361,8 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
         _log("deface: onnxruntime nicht gefunden – nutze CPU")
 
     import cv2
-    from deface.centerface import CenterFace
 
-    if not os.path.exists(input_path):
-        raise RuntimeError(
-            f"Datei nicht gefunden: {input_path}\n"
-            f"Prüfe ob das Volume im Docker-Container korrekt gemountet ist."
-        )
-
-    cap = cv2.VideoCapture(input_path)
-    if not cap.isOpened():
-        raise RuntimeError(f"Kann Video nicht öffnen (Codec-Problem?): {input_path}")
-
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    _log(f"Video: {w}x{h} @ {fps:.1f}fps, {total_frames} Frames")
-
-    # ── Gesichts-Detektor aufbauen ────────────────────────────────────────────
+    # ── Gesichts-Detektor ─────────────────────────────────────────────────────
     cf = None
     face_yolo_sess = None
     if mode in ("faces", "both"):
@@ -1344,8 +1376,7 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
             model_path = str(_MODELS_PATH / f"{face_model_id}.onnx")
             if not os.path.exists(model_path):
                 _log(f"Gesichts-Modell nicht gefunden ({face_model_id}) – Fallback auf CenterFace")
-                res_map = {"720p": (720, 1280), "1080p": (1080, 1920)}
-                in_shape = res_map.get(detection_resolution, (720, 1280))
+                in_shape = {"720p": (720, 1280), "1080p": (1080, 1920)}.get(detection_resolution, (720, 1280))
                 cf = _load_centerface(in_shape, providers)
             else:
                 try:
@@ -1353,11 +1384,10 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                     _log(f"deface: YOLOv8 Gesichts-Modell geladen: {face_model_id}")
                 except Exception as exc:
                     _log(f"Gesichts-Modell Ladefehler: {exc} – Fallback auf CenterFace")
-                    res_map = {"720p": (720, 1280), "1080p": (1080, 1920)}
-                    in_shape = res_map.get(detection_resolution, (720, 1280))
+                    in_shape = {"720p": (720, 1280), "1080p": (1080, 1920)}.get(detection_resolution, (720, 1280))
                     cf = _load_centerface(in_shape, providers)
 
-    # ── Kennzeichen-Detektor aufbauen ─────────────────────────────────────────
+    # ── Kennzeichen-Detektor ──────────────────────────────────────────────────
     plate_yolo_sess = None
     if mode in ("plates", "both") and plate_model_file:
         try:
@@ -1366,46 +1396,68 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
         except Exception as exc:
             _log(f"Kennzeichen-Modell Ladefehler: {exc}")
             if mode == "plates":
-                cap.release()
                 subprocess.run(["cp", "--", input_path, output_path], check=True)
                 return
 
-    # ── Video Reader/Writer ───────────────────────────────────────────────────
-    read_q: queue.Queue = queue.Queue(maxsize=_FRAME_BUFFER)
-    write_q: queue.Queue = queue.Queue(maxsize=_FRAME_BUFFER)
-    thread_errors: list = []
+    # ── Hardware-Beschleunigung ermitteln ─────────────────────────────────────
+    use_nvdec = _check_nvdec()
+    use_nvenc = _check_nvenc()
+    _log(f"Hardware: NVDEC={'ja' if use_nvdec else 'nein'}, NVENC={'ja' if use_nvenc else 'nein'}")
 
-    def _reader():
-        try:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    read_q.put(None)
-                    break
-                read_q.put(frame)
-        except Exception as exc:
-            thread_errors.append(exc)
-            read_q.put(None)
+    frame_size = w * h * 3  # BGR24 Bytes pro Frame
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    vid_out = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
+    wakeup_disk(input_path)
 
-    def _writer():
-        try:
-            while True:
-                item = write_q.get()
-                if item is None:
-                    break
-                vid_out.write(item)
-        except Exception as exc:
-            thread_errors.append(exc)
-        finally:
-            vid_out.release()
+    # ── ffmpeg Decoder (NVDEC oder CPU) ───────────────────────────────────────
+    hwaccel_args = ["-hwaccel", "cuda"] if use_nvdec else []
+    decode_cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        *hwaccel_args, "-i", input_path,
+        "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
+    ]
 
-    t_read = threading.Thread(target=_reader, daemon=True)
-    t_write = threading.Thread(target=_writer, daemon=True)
-    t_read.start()
-    t_write.start()
+    # ── ffmpeg Encoder (NVENC oder libx264) ───────────────────────────────────
+    if use_nvenc:
+        vcodec_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "18"]
+        codec_label = "NVDEC+NVENC" if use_nvdec else "NVENC"
+    else:
+        vcodec_args = ["-c:v", "libx264", "-crf", "18", "-preset", "fast"]
+        codec_label = "CPU"
+
+    tmp_output = output_path + ".enc.tmp.mp4"
+    encode_cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-s", f"{w}x{h}", "-r", f"{fps_num}/{fps_den}",
+        "-i", "pipe:0",
+        "-i", input_path,
+        "-map", "0:v:0", "-map", "1:a?",
+        *vcodec_args, "-c:a", "copy",
+        tmp_output,
+    ]
+
+    dec_proc = subprocess.Popen(
+        decode_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        bufsize=frame_size * 4,
+    )
+    enc_proc = subprocess.Popen(
+        encode_cmd,
+        stdin=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=frame_size * 4,
+    )
+
+    # stderr-Drainer damit der Encoder-Pipe-Buffer nicht blockiert
+    enc_stderr_lines: list = []
+
+    def _drain_enc_stderr():
+        for line in iter(enc_proc.stderr.readline, b""):
+            enc_stderr_lines.append(line.decode("utf-8", errors="replace").rstrip())
+
+    t_enc_err = threading.Thread(target=_drain_enc_stderr, daemon=True)
+    t_enc_err.start()
 
     frame_idx = 0
     start_time = time.time()
@@ -1416,13 +1468,13 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
     plate_buffer: dict = {}
     total_face_detections = 0
     total_plate_detections = 0
-    face_bbox_sample: list = []   # (frame_idx, x, y, x2, y2)
-    face_bbox_areas: list = []    # (x2-x)*(y2-y) für Statistik
+    face_bbox_sample: list = []
+    face_bbox_areas: list = []
 
     try:
         while True:
-            frame = read_q.get(timeout=60)
-            if frame is None:
+            raw_bytes = dec_proc.stdout.read(frame_size)
+            if len(raw_bytes) < frame_size:
                 break
 
             with _lock:
@@ -1430,6 +1482,7 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                     cancelled = True
                     break
 
+            frame = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((h, w, 3)).copy()
             frame_idx += 1
 
             # ── Gesichts-Detektion ─────────────────────────────────────────
@@ -1440,9 +1493,9 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                 elif cf is not None:
                     try:
                         result = cf(frame, threshold=0.1)
-                        raw = result[0] if (result is not None and result[0] is not None) else []
+                        raw_dets = result[0] if (result is not None and result[0] is not None) else []
                         expanded = []
-                        for x, y, x2, y2, _ in raw:
+                        for x, y, x2, y2, _ in raw_dets:
                             ex = max(2, int((x2 - x) * 0.30))
                             ey = max(2, int((y2 - y) * 0.30))
                             expanded.append((
@@ -1461,10 +1514,15 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
             # ── Kennzeichen-Detektion mit temporalem Buffer ────────────────
             plate_dets: list = []
             if mode in ("plates", "both") and plate_yolo_sess is not None:
-                raw_plates = _yolov8_detect(plate_yolo_sess, frame, conf_thresh=_PLATE_CONF_THRESH, aspect_filter=True)
+                raw_plates = _yolov8_detect(
+                    plate_yolo_sess, frame, conf_thresh=_PLATE_CONF_THRESH, aspect_filter=True
+                )
                 new_keys: set = set()
                 for box in raw_plates:
-                    key = (box[0] // _PLATE_GRID, box[1] // _PLATE_GRID, box[2] // _PLATE_GRID, box[3] // _PLATE_GRID)
+                    key = (
+                        box[0] // _PLATE_GRID, box[1] // _PLATE_GRID,
+                        box[2] // _PLATE_GRID, box[3] // _PLATE_GRID,
+                    )
                     plate_buffer[key] = (box, _PLATE_TTL)
                     new_keys.add(key)
                 for k in list(plate_buffer):
@@ -1480,7 +1538,6 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
             total_plate_detections += len(plate_dets)
 
             # ── Blur anwenden ──────────────────────────────────────────────
-            # Gesichter: Gaussian-Blur (stark, auch auf kleinen Regionen sichtbar)
             for x, y, x2, y2 in face_dets:
                 rw, rh = x2 - x, y2 - y
                 if rw < 4 or rh < 4:
@@ -1488,10 +1545,9 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                 roi = frame[y:y2, x:x2]
                 if roi.size == 0:
                     continue
-                ksize = max(31, (rw // 2) | 1)   # mind. 31px – bei 4K sonst kaum sichtbar
+                ksize = max(31, (rw // 2) | 1)
                 frame[y:y2, x:x2] = cv2.GaussianBlur(roi, (ksize, ksize), 0)
 
-            # Kennzeichen: Pixelation (schneller, für klare Rechtecke)
             for x, y, x2, y2 in plate_dets:
                 roi = frame[y:y2, x:x2]
                 if roi.size > 0:
@@ -1501,7 +1557,7 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                         cv2.resize(roi, (bw, bh)), (x2 - x, y2 - y)
                     )
 
-            write_q.put(frame)
+            enc_proc.stdin.write(frame.tobytes())
 
             now = time.time()
             elapsed = now - start_time
@@ -1521,32 +1577,21 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                 if milestone > 0 and milestone > last_milestone:
                     last_milestone = milestone
                     post_status(status_url, {
-                        "event": "frame_progress",
-                        "name": job_name,
-                        "mode": mode,
-                        "pct": milestone,
-                        "frame_current": frame_idx,
-                        "frame_total": total_frames,
-                        "eta_seconds": eta,
+                        "event": "frame_progress", "name": job_name, "mode": mode,
+                        "pct": milestone, "frame_current": frame_idx,
+                        "frame_total": total_frames, "eta_seconds": eta,
                         "eta_human": _format_eta(eta),
                     })
             elif now - last_log_time >= 30:
                 _log(f"  {frame_idx:,} Frames verarbeitet (Länge unbekannt)")
                 last_log_time = now
-                post_status(status_url, {
-                    "event": "frame_progress",
-                    "name": job_name,
-                    "mode": mode,
-                    "pct": 0,
-                    "frame_current": frame_idx,
-                    "frame_total": 0,
-                    "eta_seconds": 0,
-                    "eta_human": "unbekannt",
-                })
+
     finally:
-        _log(f"Detektion-Zusammenfassung: {total_face_detections} Gesichts-Erkennungen, "
-             f"{total_plate_detections} Kennzeichen-Erkennungen über {frame_idx} Frames "
-             f"(Modus: {mode})")
+        _log(
+            f"Detektion-Zusammenfassung: {total_face_detections} Gesichts-Erkennungen, "
+            f"{total_plate_detections} Kennzeichen-Erkennungen über {frame_idx} Frames "
+            f"(Modus: {mode})"
+        )
         if mode in ("faces", "both"):
             if total_face_detections == 0:
                 _log("WARNUNG: Kein Gesicht erkannt! CenterFace evtl. fehlerhaft geladen.")
@@ -1555,53 +1600,42 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                     avg_a = sum(face_bbox_areas) / len(face_bbox_areas)
                     min_a = min(face_bbox_areas)
                     max_a = max(face_bbox_areas)
-                    _log(f"Gesicht BBox-Fläche: min={min_a}px² avg={avg_a:.0f}px² max={max_a}px² (Framegröße: {w}x{h}={w*h}px²)")
+                    _log(
+                        f"Gesicht BBox-Fläche: min={min_a}px² avg={avg_a:.0f}px² max={max_a}px² "
+                        f"(Framegröße: {w}x{h}={w * h}px²)"
+                    )
                 for s in face_bbox_sample:
                     fi, fx, fy, fx2, fy2 = s
-                    _log(f"Gesicht Beispiel Frame {fi}: ({fx},{fy})-({fx2},{fy2}) → {fx2-fx}x{fy2-fy}px")
-        write_q.put(None)
-        t_read.join(timeout=10)
-        t_write.join(timeout=30)
-        cap.release()
+                    _log(f"Gesicht Beispiel Frame {fi}: ({fx},{fy})-({fx2},{fy2}) → {fx2 - fx}x{fy2 - fy}px")
 
-    if thread_errors:
-        raise thread_errors[0]
+        # Encoder flushen und warten
+        _set(state="render", out_name=os.path.basename(output_path))
+        try:
+            enc_proc.stdin.close()
+        except Exception:
+            pass
+        enc_proc.wait(timeout=300)
+        t_enc_err.join(timeout=5)
+        dec_proc.stdout.close()
+        dec_proc.wait(timeout=30)
+        _set(state="blur")
 
     if cancelled:
         with _lock:
             _cancel_flag = False
         _log(f"  ⚠️ Abbruch – {frame_idx}/{total_frames} Frames verarbeitet")
-        if os.path.exists(output_path):
-            os.remove(output_path)
+        if os.path.exists(tmp_output):
+            os.remove(tmp_output)
         raise RuntimeError("cancelled")
 
-    # ── mp4v → H.264 Re-Encode (NVENC / libx264) ─────────────────────────────
-    _set(state="render", out_name=os.path.basename(output_path))
-    raw_size_mb = os.path.getsize(output_path) / 1_048_576 if os.path.exists(output_path) else 0
-    _log(f"Re-encode startet... (OpenCV-Rohvideo: {raw_size_mb:.1f} MB)")
-    tmp_out = output_path + ".tmp.mp4"
-    os.rename(output_path, tmp_out)
-    result = subprocess.run(
-        ["ffmpeg", "-y", "-i", tmp_out, "-i", input_path,
-         "-map", "0:v:0", "-map", "1:a?",
-         "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "18",
-         "-c:a", "copy", output_path],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        _log("NVENC nicht verfügbar – Fallback auf libx264")
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-i", tmp_out, "-i", input_path,
-             "-map", "0:v:0", "-map", "1:a?",
-             "-c:v", "libx264", "-crf", "18",
-             "-preset", "fast", "-c:a", "copy", output_path],
-            capture_output=True, text=True
-        )
-    else:
-        _log("Re-encode via NVENC (GPU)")
-    os.remove(tmp_out)
-    _set(state="blur")
-    if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg re-encode Fehler: {result.stderr[-400:]}")
+    if enc_proc.returncode != 0:
+        err_text = "\n".join(enc_stderr_lines[-20:]) if enc_stderr_lines else "(keine Fehlerausgabe)"
+        if os.path.exists(tmp_output):
+            os.remove(tmp_output)
+        raise RuntimeError(f"Encoder fehlgeschlagen (code={enc_proc.returncode}): {err_text[:500]}")
 
-    _log(f"deface [{mode}] abgeschlossen: {frame_idx:,} Frames verarbeitet")
+    if os.path.exists(output_path):
+        os.remove(output_path)
+    os.rename(tmp_output, output_path)
+
+    _log(f"deface [{mode}] abgeschlossen: {frame_idx:,} Frames ({codec_label})")
