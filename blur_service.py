@@ -1087,7 +1087,7 @@ def process_jobs(jobs: list, resume_url: str, status_url: str = "", full_job: di
 # ── deface: direkt per Python API ────────────────────────────────────────────
 _FRAME_BUFFER = 32
 _PLATE_CONF_THRESH = 0.45
-_PLATE_GRID = 30
+_PLATE_GRID = 20
 _DETECTION_INTERVAL = 4
 
 
@@ -1336,7 +1336,7 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
     last_log_time = 0.0
     last_milestone = 0
     cancelled = False
-    _PLATE_TTL = 10
+    _PLATE_TTL = 20
     plate_buffer: dict = {}
     total_face_detections = 0
     total_plate_detections = 0
@@ -1451,7 +1451,7 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
             # ── Blur anwenden ──────────────────────────────────────────────
             for x, y, x2, y2 in face_dets:
                 rw, rh = x2 - x, y2 - y
-                if rw < 4 or rh < 4:
+                if rw < 50 or rh < 50:
                     continue
                 roi = frame[y:y2, x:x2]
                 if roi.size == 0:
