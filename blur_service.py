@@ -1206,8 +1206,34 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
         total_frames = int(float(in_vs.duration) * float(in_vs.time_base) * fps)
     _log(f"Video: {w}x{h} @ {fps:.1f}fps, {total_frames} Frames")
 
-    # Rotation aus Stream-Metadaten lesen (z.B. DJI Dashcam: rotate=180)
-    _rotation = int(in_vs.metadata.get('rotate', 0) or 0)
+    # Rotation aus Stream- oder Container-Metadaten lesen
+    _rotation = 0
+    _rot_raw = in_vs.metadata.get('rotate', '') or in_container.metadata.get('rotate', '')
+    _log(f"PyAV Metadaten: stream={dict(in_vs.metadata)} container={dict(in_container.metadata)}")
+    if _rot_raw:
+        try:
+            _rotation = int(_rot_raw)
+        except (ValueError, TypeError):
+            _rotation = 0
+
+    # Fallback: ffprobe (erkennt auch displaymatrix-basierte Rotation)
+    if _rotation == 0:
+        try:
+            _probe = subprocess.run(
+                ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', input_path],
+                capture_output=True, text=True, timeout=10
+            )
+            _pdata = json.loads(_probe.stdout)
+            for _ps in _pdata.get('streams', []):
+                if _ps.get('codec_type') == 'video':
+                    _rot_str = str(_ps.get('tags', {}).get('rotate', '0') or '0')
+                    _rotation = int(_rot_str)
+                    if _rotation:
+                        _log(f"Rotation via ffprobe erkannt: {_rotation}°")
+                    break
+        except Exception as _exc:
+            _log(f"ffprobe Rotations-Check fehlgeschlagen: {_exc}")
+
     if _rotation not in (0, 90, 180, 270):
         _rotation = 0
     if _rotation != 0:
