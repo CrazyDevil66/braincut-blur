@@ -1199,6 +1199,8 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
     h = in_vs.height
     fps_rate = in_vs.average_rate  # Fraction (z.B. 100/1)
     fps = float(fps_rate)
+    from fractions import Fraction as _Frac
+    _out_tb = _Frac(1, max(1, int(round(fps))))
     total_frames = in_vs.frames or 0
     if not total_frames and in_vs.duration and fps > 0:
         total_frames = int(float(in_vs.duration) * float(in_vs.time_base) * fps)
@@ -1441,8 +1443,8 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
                     )
 
             _out_frame = _av.VideoFrame.from_ndarray(frame, format='bgr24')
-            _out_frame.pts = _av_frame.pts if _av_frame.pts is not None else frame_idx - 1
-            _out_frame.time_base = in_vs.time_base
+            _out_frame.pts = frame_idx - 1
+            _out_frame.time_base = _out_tb
             for _enc_pkt in out_video.encode(_out_frame):
                 out_container.mux(_enc_pkt)
 
