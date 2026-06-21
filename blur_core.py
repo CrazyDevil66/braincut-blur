@@ -17,6 +17,7 @@ from utils import post_status, wakeup_disk
 
 
 def process_jobs(jobs: list, resume_url: str, status_url: str = "", full_job: dict = None) -> None:
+    state.clear_cancel()
     status_url = _fix_status_url(status_url)
     total = len(jobs)
     errors = []
@@ -161,62 +162,57 @@ def run_deface(
             "Prüfe ob das Volume im Docker-Container korrekt gemountet ist."
         )
 
-    import av as _av
+    import numpy as _np
 
-    use_nvdec = False
+    # Video-Metadaten komplett via ffprobe
+    _pdata: dict = {}
     try:
-        _av.codec.Codec('h264_cuvid', 'r')
-        in_container = _av.open(input_path, options={'video_codec': 'h264_cuvid'})
-        use_nvdec = True
-    except Exception as _nvdec_err:
-        state._log(f"NVDEC nicht verfügbar ({_nvdec_err}) – CPU-Decoder")
-        in_container = _av.open(input_path)
+        _probe_r = subprocess.run(
+            ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', input_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        _pdata = json.loads(_probe_r.stdout)
+    except Exception as _exc:
+        state._log(f"ffprobe fehlgeschlagen: {_exc}")
 
-    in_vs = in_container.streams.video[0]
-    if not use_nvdec:
-        in_vs.codec_context.thread_count = 0
-    w = in_vs.width
-    h = in_vs.height
-    fps_rate = in_vs.average_rate
-    fps = float(fps_rate)
-    _out_tb = _Frac(1, max(1, int(round(fps))))
-    total_frames = in_vs.frames or 0
-    if not total_frames and in_vs.duration and fps > 0:
-        total_frames = int(float(in_vs.duration) * float(in_vs.time_base) * fps)
-    state._log(f"Video: {w}x{h} @ {fps:.1f}fps, {total_frames} Frames")
-
+    w = h = total_frames = 0
+    fps = 30.0
+    fps_str = "30/1"
     _rotation = 0
-    _rot_raw = in_vs.metadata.get('rotate', '') or in_container.metadata.get('rotate', '')
-    state._log(f"PyAV Metadaten: stream={dict(in_vs.metadata)} container={dict(in_container.metadata)}")
-    if _rot_raw:
-        try:
-            _rotation = int(_rot_raw)
-        except (ValueError, TypeError):
-            _rotation = 0
+    for _ps in _pdata.get('streams', []):
+        if _ps.get('codec_type') == 'video':
+            w = _ps.get('width', 0)
+            h = _ps.get('height', 0)
+            _rfr = _ps.get('r_frame_rate', '30/1')
+            if '/' in _rfr:
+                _rn, _rd = _rfr.split('/', 1)
+                fps = float(_rn) / float(_rd) if float(_rd) > 0 else 30.0
+            else:
+                fps = float(_rfr or 30)
+            fps_str = _rfr
+            _nb = str(_ps.get('nb_frames', '') or '')
+            total_frames = int(_nb) if _nb.isdigit() else 0
+            if not total_frames and _ps.get('duration'):
+                total_frames = int(float(_ps['duration']) * fps)
+            try:
+                _rotation = int(str(_ps.get('tags', {}).get('rotate', '0') or '0'))
+            except Exception:
+                pass
+            for _sd in _ps.get('side_data_list', []):
+                if _sd.get('side_data_type') == 'Display Matrix':
+                    try:
+                        _rotation = (-int(_sd['rotation'])) % 360
+                    except Exception:
+                        pass
+            break
 
-    if _rotation == 0:
-        try:
-            _probe = subprocess.run(
-                ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', input_path],
-                capture_output=True, text=True, timeout=10,
-            )
-            _pdata = json.loads(_probe.stdout)
-            for _ps in _pdata.get('streams', []):
-                if _ps.get('codec_type') == 'video':
-                    _rot_str = str(_ps.get('tags', {}).get('rotate', '0') or '0')
-                    _rotation = int(_rot_str)
-                    if _rotation:
-                        state._log(f"Rotation via ffprobe erkannt: {_rotation}°")
-                    break
-        except Exception as _exc:
-            state._log(f"ffprobe Rotations-Check fehlgeschlagen: {_exc}")
-
+    state._log(f"Video: {w}x{h} @ {fps:.1f}fps, {total_frames} Frames")
     if _rotation not in (0, 90, 180, 270):
         _rotation = 0
-    if _rotation != 0:
-        state._log(f"Video-Rotation erkannt: {_rotation}° – Frames werden korrigiert")
-        if _rotation in (90, 270):
-            w, h = h, w
+    if _rotation:
+        state._log(f"Video-Rotation erkannt: {_rotation}° – FFmpeg autorotiert")
+    if _rotation in (90, 270):
+        w, h = h, w  # angezeigte Auflösung (FFmpeg dreht automatisch)
 
     try:
         import onnxruntime as ort
@@ -277,33 +273,37 @@ def run_deface(
 
     wakeup_disk(input_path)
     tmp_output = output_path + ".enc.tmp.mp4"
-    out_container = _av.open(tmp_output, 'w')
 
-    use_nvenc = False
-    try:
-        out_video = out_container.add_stream('h264_nvenc', rate=fps_rate)
-        out_video.options = {'preset': 'p4', 'cq': '18'}
-        use_nvenc = True
-    except Exception as _nvenc_err:
-        state._log(f"NVENC nicht verfügbar ({_nvenc_err}) – libx264 (CPU)")
-        out_video = out_container.add_stream('libx264', rate=fps_rate)
-        out_video.options = {'crf': '18', 'preset': 'fast'}
-    out_video.width = w
-    out_video.height = h
-    out_video.pix_fmt = 'yuv420p'
-    state._log(
-        f"Hardware: PyAV-Decoder ({'NVDEC/h264_cuvid' if use_nvdec else 'CPU multithreaded'}), "
-        f"NVENC={'ja' if use_nvenc else 'nein'}"
+    from detection import _check_nvenc
+    use_nvenc = _check_nvenc()
+
+    # System-FFmpeg: -hwaccel cuda → GPU-Decode wenn verfügbar, sonst CPU-Fallback
+    dec_cmd = [
+        'ffmpeg', '-loglevel', 'error',
+        '-hwaccel', 'cuda',
+        '-i', input_path,
+        '-f', 'rawvideo', '-pix_fmt', 'bgr24',
+        'pipe:1',
+    ]
+    _enc_codec = (
+        ['-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', '18']
+        if use_nvenc else
+        ['-c:v', 'libx264', '-crf', '18', '-preset', 'fast']
     )
-    state._set(hw_nvdec=use_nvdec, hw_nvenc=use_nvenc)
+    enc_cmd = [
+        'ffmpeg', '-loglevel', 'error', '-y',
+        '-f', 'rawvideo', '-pix_fmt', 'bgr24',
+        '-s', f'{w}x{h}', '-r', fps_str,
+        '-i', 'pipe:0',
+    ] + _enc_codec + ['-pix_fmt', 'yuv420p', '-an', tmp_output]
 
-    in_audio_streams = list(in_container.streams.audio)
-    out_audio = None
-    if in_audio_streams:
-        try:
-            out_audio = out_container.add_stream(template=in_audio_streams[0])
-        except Exception:
-            pass
+    state._log(f"Hardware: FFmpeg+CUDA (auto), NVENC={'ja (h264_nvenc)' if use_nvenc else 'nein (libx264)'}")
+    state._set(hw_nvdec=True, hw_nvenc=use_nvenc)
+
+    proc_dec = subprocess.Popen(dec_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    proc_enc = subprocess.Popen(enc_cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+    frame_bytes = w * h * 3
 
     frame_idx = 0
     start_time = time.time()
@@ -344,29 +344,17 @@ def run_deface(
         def _plate_callable(f, _s=plate_yolo_sess, _ct=_conf_thresh):
             return _yolov8_detect(_s, f, conf_thresh=_ct, aspect_filter=True)
 
-    def _iter_decoded():
-        for _pkt in in_container.demux():
-            if _pkt.stream.type == 'audio' and out_audio is not None:
-                _pkt.stream = out_audio
-                out_container.mux(_pkt)
-                continue
-            if _pkt.stream.type != 'video':
-                continue
-            for _avf in _pkt.decode():
-                yield _avf.to_ndarray(format='bgr24'), _avf
-
     try:
-        for frame, _av_frame in _iter_decoded():
+        while True:
+            raw = proc_dec.stdout.read(frame_bytes)
+            if len(raw) < frame_bytes:
+                break
+
             if state.is_cancel_requested():
                 cancelled = True
                 break
 
-            if _rotation == 180:
-                frame = cv2.rotate(frame, cv2.ROTATE_180)
-            elif _rotation == 90:
-                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            elif _rotation == 270:
-                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            frame = _np.frombuffer(raw, dtype=_np.uint8).reshape((h, w, 3)).copy()
 
             frame_idx += 1
             should_detect = (frame_idx % _det_interval == 1)
@@ -433,11 +421,7 @@ def run_deface(
                     bh = max(1, (y2 - y) // 10)
                     frame[y:y2, x:x2] = cv2.resize(cv2.resize(roi, (bw, bh)), (x2 - x, y2 - y))
 
-            _out_frame = _av.VideoFrame.from_ndarray(frame, format='bgr24')
-            _out_frame.pts = frame_idx - 1
-            _out_frame.time_base = _out_tb
-            for _enc_pkt in out_video.encode(_out_frame):
-                out_container.mux(_enc_pkt)
+            proc_enc.stdin.write(frame.tobytes())
 
             now = time.time()
             elapsed = now - start_time
@@ -500,18 +484,18 @@ def run_deface(
 
         state._set(state="render", out_name=os.path.basename(output_path))
         try:
-            for _enc_pkt in out_video.encode(None):
-                out_container.mux(_enc_pkt)
+            proc_enc.stdin.close()
         except Exception:
             pass
         try:
-            out_container.close()
+            proc_enc.wait(timeout=300)
         except Exception:
-            pass
+            proc_enc.kill()
         try:
-            in_container.close()
+            proc_dec.terminate()
+            proc_dec.wait(timeout=10)
         except Exception:
-            pass
+            proc_dec.kill()
         state._set(state="blur")
 
     if cancelled:
@@ -524,6 +508,24 @@ def run_deface(
     if not os.path.exists(tmp_output) or os.path.getsize(tmp_output) < 1024:
         raise RuntimeError(f"Encoder fehlgeschlagen: Ausgabedatei fehlt oder leer ({tmp_output})")
 
+    # Audio aus Originaldatei in die Ausgabe muxen (Encode hatte -an)
+    final_tmp = output_path + ".final.tmp.mp4"
+    try:
+        subprocess.run(
+            ['ffmpeg', '-loglevel', 'error', '-y',
+             '-i', tmp_output, '-i', input_path,
+             '-map', '0:v:0', '-map', '1:a?', '-c', 'copy',
+             final_tmp],
+            timeout=120, check=False,
+        )
+    except Exception as _mux_err:
+        state._log(f"Audio-Mux fehlgeschlagen ({_mux_err}) – Video ohne Audio")
+        final_tmp = tmp_output
+
+    if os.path.exists(tmp_output) and final_tmp != tmp_output:
+        os.remove(tmp_output)
+    if not os.path.exists(final_tmp) or os.path.getsize(final_tmp) < 1024:
+        raise RuntimeError("Ausgabedatei nach Audio-Mux fehlt oder leer")
     if os.path.exists(output_path):
         os.remove(output_path)
-    os.rename(tmp_output, output_path)
+    os.rename(final_tmp, output_path)
