@@ -179,8 +179,10 @@ def run_deface(
     fps = 30.0
     fps_str = "30/1"
     _rotation = 0
+    _video_codec = ''
     for _ps in _pdata.get('streams', []):
         if _ps.get('codec_type') == 'video':
+            _video_codec = _ps.get('codec_name', '')
             w = _ps.get('width', 0)
             h = _ps.get('height', 0)
             _rfr = _ps.get('r_frame_rate', '30/1')
@@ -277,10 +279,13 @@ def run_deface(
     from detection import _check_nvenc
     use_nvenc = _check_nvenc()
 
-    # System-FFmpeg: -hwaccel cuda → GPU-Decode wenn verfügbar, sonst CPU-Fallback
+    # Passenden CUVID-Decoder wählen (explizit, damit NVDEC-Hardware tatsächlich aktiv wird)
+    _cuvid_map = {'h264': 'h264_cuvid', 'hevc': 'hevc_cuvid', 'vp9': 'vp9_cuvid', 'av1': 'av1_cuvid'}
+    _cuvid = _cuvid_map.get(_video_codec, '')
+    _cuvid_args = ['-hwaccel', 'cuda', '-c:v', _cuvid] if _cuvid else ['-hwaccel', 'cuda']
     dec_cmd = [
         'ffmpeg', '-loglevel', 'error',
-        '-hwaccel', 'cuda',
+    ] + _cuvid_args + [
         '-i', input_path,
         '-f', 'rawvideo', '-pix_fmt', 'bgr24',
         'pipe:1',
@@ -297,7 +302,9 @@ def run_deface(
         '-i', 'pipe:0',
     ] + _enc_codec + ['-pix_fmt', 'yuv420p', '-an', tmp_output]
 
-    state._log(f"Hardware: FFmpeg+CUDA (auto), NVENC={'ja (h264_nvenc)' if use_nvenc else 'nein (libx264)'}")
+    state._log(
+        f"Hardware: NVDEC={_cuvid or '–'}, NVENC={'h264_nvenc' if use_nvenc else '– (libx264)'}"
+    )
     state._set(hw_nvdec=True, hw_nvenc=use_nvenc)
 
     proc_dec = subprocess.Popen(dec_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
