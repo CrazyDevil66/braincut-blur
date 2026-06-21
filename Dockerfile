@@ -45,7 +45,7 @@ ENV TZ=Europe/Berlin
 ENV XDG_CACHE_HOME=/app/deface_cache
 ENV QT_QPA_PLATFORM=offscreen
 ENV NVIDIA_VISIBLE_DEVICES=all
-ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 
 VOLUME /app/.cache
 

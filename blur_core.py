@@ -168,7 +168,8 @@ def run_deface(
         _av.codec.Codec('h264_cuvid', 'r')
         in_container = _av.open(input_path, options={'video_codec': 'h264_cuvid'})
         use_nvdec = True
-    except Exception:
+    except Exception as _nvdec_err:
+        state._log(f"NVDEC nicht verfügbar ({_nvdec_err}) – CPU-Decoder")
         in_container = _av.open(input_path)
 
     in_vs = in_container.streams.video[0]
@@ -283,7 +284,8 @@ def run_deface(
         out_video = out_container.add_stream('h264_nvenc', rate=fps_rate)
         out_video.options = {'preset': 'p4', 'cq': '18'}
         use_nvenc = True
-    except Exception:
+    except Exception as _nvenc_err:
+        state._log(f"NVENC nicht verfügbar ({_nvenc_err}) – libx264 (CPU)")
         out_video = out_container.add_stream('libx264', rate=fps_rate)
         out_video.options = {'crf': '18', 'preset': 'fast'}
     out_video.width = w
