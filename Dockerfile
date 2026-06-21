@@ -52,7 +52,7 @@ VOLUME /app/.cache
 # Gesichts-Modell beim Build herunterladen (kein Delay beim ersten Job)
 RUN python -c "from deface.centerface import CenterFace; CenterFace()"
 
-COPY blur_service.py .
+COPY *.py .
 
 EXPOSE 8080
 
