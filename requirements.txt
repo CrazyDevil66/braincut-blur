@@ -1,7 +1,7 @@
 fastapi==0.111.0
 uvicorn[standard]==0.29.0
 deface==0.3.0
-onnxruntime-gpu
-onnx
+onnxruntime-gpu==1.18.1
+onnx==1.16.1
 requests==2.31.0
-av
+av==12.3.0

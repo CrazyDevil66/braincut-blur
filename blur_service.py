@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import tempfile
 import threading
@@ -13,7 +14,7 @@ from threading import Lock
 import numpy as np
 import requests
 from fastapi import BackgroundTasks, FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -23,6 +24,8 @@ app = FastAPI(title="BrainCut Blur Service")
 # ── Globaler Status ───────────────────────────────────────────────────────────
 _lock = Lock()
 _cancel_flag = False
+_render_lock = Lock()
+_current_render_process: "subprocess.Popen | None" = None
 _n8n_ip = os.getenv("N8N_SERVER_IP", "")
 _n8n_port = os.getenv("N8N_SERVER_PORT", "5678")
 COMPLETION_WEBHOOK = f"http://{_n8n_ip}:{_n8n_port}/webhook/blur-done" if _n8n_ip else ""
@@ -32,9 +35,19 @@ _media_host_path = os.getenv("MEDIA_HOST_PATH", "/mnt/user/n8n_automation/BrainC
 _CONTAINER_ROOT = "/data"
 
 def _remap(path: str) -> str:
-    if path.startswith(_media_host_path):
+    if path == _media_host_path or path.startswith(_media_host_path + "/"):
         return _CONTAINER_ROOT + path[len(_media_host_path):]
     return path
+
+DATA_ROOT = Path("/data").resolve()
+
+def validate_data_path(p: str) -> str:
+    if not p:
+        raise RuntimeError("Leerer Pfad nicht erlaubt")
+    resolved = Path(p).resolve()
+    if resolved != DATA_ROOT and DATA_ROOT not in resolved.parents:
+        raise RuntimeError(f"Pfad außerhalb von /data nicht erlaubt: {p}")
+    return str(resolved)
 
 def _fix_status_url(url: str) -> str:
     if _n8n_ip and "localhost" in url:
@@ -142,12 +155,15 @@ def _get_installed_models() -> dict:
     return result
 
 
+_MAX_MODEL_BYTES = 500 * 1024 * 1024  # 500 MB
+
 def _install_model_bg(model_id: str, url: str, hf_token: str = ""):
     with _install_lock:
         _install_progress[model_id] = {"status": "downloading", "pct": 0, "error": ""}
+    _MODELS_PATH.mkdir(parents=True, exist_ok=True)
+    target = _MODELS_PATH / f"{model_id}.onnx"
+    target_tmp = _MODELS_PATH / f"{model_id}.onnx.tmp"
     try:
-        _MODELS_PATH.mkdir(parents=True, exist_ok=True)
-        target = _MODELS_PATH / f"{model_id}.onnx"
         headers = {}
         if hf_token:
             headers["Authorization"] = f"Bearer {hf_token}"
@@ -155,21 +171,34 @@ def _install_model_bg(model_id: str, url: str, hf_token: str = ""):
         if r.status_code == 401:
             raise RuntimeError("401 Unauthorized – HuggingFace-Token erforderlich. Token im Einstellungen-Panel eingeben.")
         r.raise_for_status()
+        content_type = r.headers.get("content-type", "")
+        if "text/html" in content_type or "text/plain" in content_type:
+            raise RuntimeError(f"Unerwarteter Content-Type: {content_type} – kein Modell?")
         total = int(r.headers.get("content-length", 0))
+        if total and total > _MAX_MODEL_BYTES:
+            raise RuntimeError(f"Modell zu groß: {total // 1_048_576} MB (Limit: 500 MB)")
         downloaded = 0
-        with open(target, "wb") as f:
+        with open(target_tmp, "wb") as f:
             for chunk in r.iter_content(chunk_size=65536):
                 if chunk:
                     f.write(chunk)
                     downloaded += len(chunk)
+                    if downloaded > _MAX_MODEL_BYTES:
+                        raise RuntimeError(f"Modell überschreitet 500 MB Limit – Download abgebrochen")
                     if total:
                         pct = min(99, int(downloaded / total * 100))
                         with _install_lock:
                             _install_progress[model_id]["pct"] = pct
+        os.replace(target_tmp, target)
         with _install_lock:
             _install_progress[model_id] = {"status": "done", "pct": 100, "error": ""}
         _log(f"Modell installiert: {model_id} ({round(target.stat().st_size/1_048_576,1)} MB)")
     except Exception as exc:
+        if target_tmp.exists():
+            try:
+                target_tmp.unlink()
+            except Exception:
+                pass
         with _install_lock:
             _install_progress[model_id] = {"status": "error", "pct": 0, "error": str(exc)[:300]}
         _log(f"Modell-Installation fehlgeschlagen ({model_id}): {exc}")
@@ -753,6 +782,13 @@ def blur(data: dict, bg: BackgroundTasks):
     resume_url = data.get("resumeUrl", "")
     status_url = data.get("statusUrl", "")
     full_job = data.get("fullJob", {})
+    with _lock:
+        if _status["state"] != "idle":
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Job läuft bereits", "state": _status["state"]},
+            )
+        _status["state"] = "queued"
     _log(f"Blur-Auftrag empfangen: {len(jobs)} Job(s)")
     bg.add_task(process_jobs, jobs, resume_url, status_url, full_job)
     return {"status": "queued", "count": len(jobs)}
@@ -764,34 +800,293 @@ def cancel_job():
     with _lock:
         _cancel_flag = True
     _log("⚠️ Abbruch angefordert")
+    with _render_lock:
+        if _current_render_process is not None:
+            try:
+                _current_render_process.terminate()
+                _log("FFmpeg-Prozess beendet (SIGTERM)")
+            except Exception as exc:
+                _log(f"FFmpeg beenden fehlgeschlagen: {exc}")
     return {"status": "cancel_requested"}
 
 
 @app.post("/run-shell")
 def run_shell(data: dict):
-    """FFmpeg-Kommando im Container ausführen (ersetzt N8N SSH-Node)."""
-    cmd = data.get("cmd", "").strip()
-    if not cmd:
-        return {"stdout": "", "stderr": "Kein Befehl angegeben", "exitCode": 1}
-    cmd_remapped = cmd.replace(_media_host_path, _CONTAINER_ROOT)
-    _log(f"Shell-Befehl gestartet ({len(cmd_remapped)} Zeichen)")
+    return JSONResponse(
+        status_code=410,
+        content={"error": "/run-shell wurde aus Sicherheitsgründen entfernt. Bitte N8N-Workflow aktualisieren."},
+    )
+
+
+def _probe_clip(path: str) -> dict:
     try:
-        result = subprocess.run(
-            ["bash", "-c", cmd_remapped],
-            capture_output=True, text=True, timeout=3600
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_streams", "-show_format", path],
+            capture_output=True, text=True, timeout=15,
         )
-        _log(f"Shell-Befehl beendet: exitCode={result.returncode}")
-        if result.returncode != 0:
-            _log(f"stderr: {result.stderr[-500:]}")
-        return {
-            "stdout": result.stdout,
-            "stderr": result.stderr[-2000:] if result.stderr else "",
-            "exitCode": result.returncode,
-        }
-    except subprocess.TimeoutExpired:
-        return {"stdout": "", "stderr": "Timeout nach 3600s", "exitCode": 1}
+        data = json.loads(r.stdout)
+        has_audio = False
+        duration = 0.0
+        width, height, fps = 1920, 1080, 30.0
+        for s in data.get("streams", []):
+            if s.get("codec_type") == "video":
+                width = int(s.get("width", 1920))
+                height = int(s.get("height", 1080))
+                try:
+                    n, d = s.get("r_frame_rate", "30/1").split("/")
+                    fps = int(n) / max(1, int(d))
+                except Exception:
+                    fps = 30.0
+                for key in ("duration",):
+                    v = s.get(key) or data.get("format", {}).get(key)
+                    if v:
+                        try:
+                            duration = float(v)
+                        except Exception:
+                            pass
+            elif s.get("codec_type") == "audio":
+                has_audio = True
+        return {"has_audio": has_audio, "duration": duration,
+                "width": width, "height": height, "fps": fps}
     except Exception as exc:
-        return {"stdout": "", "stderr": str(exc)[:500], "exitCode": 1}
+        _log(f"ffprobe Fehler ({os.path.basename(path)}): {exc}")
+        return {"has_audio": True, "duration": 0.0,
+                "width": 1920, "height": 1080, "fps": 30.0}
+
+
+def _atempo_chain(factor: float) -> list:
+    parts = []
+    f = factor
+    while f > 2.0:
+        parts.append("atempo=2.0")
+        f /= 2.0
+    while f < 0.5:
+        parts.append("atempo=0.5")
+        f *= 2.0
+    parts.append(f"atempo={f:.4f}")
+    return parts
+
+
+def _run_render_task(render_data: dict) -> dict:
+    global _current_render_process, _cancel_flag
+
+    clips = render_data.get("clips", [])
+    audio = render_data.get("audio", {"mode": "original"})
+    output_path_raw = render_data.get("output_path", "")
+    overwrite = render_data.get("overwrite", True)
+    move_sources_to = render_data.get("move_sources_to", "")
+    cleanup_paths = render_data.get("cleanup_paths", [])
+
+    try:
+        output_path = validate_data_path(_remap(output_path_raw))
+    except RuntimeError as exc:
+        _set(state="idle", error=str(exc)[:200])
+        return {"success": False, "error": str(exc)}
+
+    _set(state="render", out_name=os.path.basename(output_path), error="")
+    _log(f"Render gestartet: {len(clips)} Clip(s) → {os.path.basename(output_path)}")
+
+    try:
+        # ── ffprobe pro Clip (#8.1) ───────────────────────────────────────────
+        probes: list = []
+        for c in clips:
+            try:
+                p = validate_data_path(_remap(c.get("path", "")))
+            except RuntimeError as exc:
+                raise RuntimeError(f"Ungültiger Clip-Pfad: {exc}") from exc
+            probes.append((p, _probe_clip(p)))
+
+        use_music = (
+            audio.get("mode") in ("replace_with_music", "mix_music")
+            and bool(audio.get("musicFile", {}).get("path"))
+        )
+        music_idx = len(clips)
+
+        # ── FFmpeg Inputs ─────────────────────────────────────────────────────
+        input_args: list = []
+        for path, _ in probes:
+            input_args += ["-i", path]
+        if use_music:
+            try:
+                music_path = validate_data_path(_remap(audio["musicFile"]["path"]))
+            except RuntimeError as exc:
+                raise RuntimeError(f"Ungültiger Musik-Pfad: {exc}") from exc
+            if audio.get("loop"):
+                input_args += ["-stream_loop", "-1"]
+            input_args += ["-i", music_path]
+
+        # ── Filter-Complex (#8.2 #8.3 #8.4) ──────────────────────────────────
+        filters: list = []
+        pairs: list = []
+        for i, (c, (path, probe)) in enumerate(zip(clips, probes)):
+            sf = float(c.get("speed_factor", 1.0))
+            vol = 0.0 if c.get("mute_audio") else max(0.0, min(3.0, float(c.get("volume_factor", 1.0))))
+            dur = probe.get("duration", 0.0)
+
+            # Video: Normalisierung Auflösung/FPS/Format (#8.3)
+            sf_int = round(sf)
+            if sf_int >= 2 and abs(sf - sf_int) < 0.01:
+                vf = (f"[{i}:v]select='not(mod(n,{sf_int}))',setpts=N/FR/TB,"
+                      f"scale=1920:-2,setsar=1,fps=30,format=yuv420p[v{i}]")
+            else:
+                vf = (f"[{i}:v]setpts={1/sf:.6f}*(PTS-STARTPTS),"
+                      f"scale=1920:-2,setsar=1,fps=30,format=yuv420p[v{i}]")
+            filters.append(vf)
+
+            # Audio: anullsrc mit Dauer + Audioformat normalisieren (#8.2 #8.4)
+            if c.get("mute_audio") or not probe.get("has_audio"):
+                dur_trim = (f",atrim=duration={dur:.4f},asetpts=PTS-STARTPTS" if dur > 0 else "")
+                filters.append(
+                    f"anullsrc=r=48000:cl=stereo{dur_trim},"
+                    f"aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a{i}]"
+                )
+            else:
+                af: list = []
+                if sf != 1.0:
+                    af += _atempo_chain(sf)
+                if vol != 1.0:
+                    af.append(f"volume={vol:.3f}")
+                af += [
+                    "asetpts=PTS-STARTPTS",
+                    "aresample=48000",
+                    "aformat=sample_fmts=fltp:channel_layouts=stereo",
+                ]
+                filters.append(f"[{i}:a]{','.join(af)}[a{i}]")
+
+            pairs.append(f"[v{i}][a{i}]")
+
+        filters.append(f"{''.join(pairs)}concat=n={len(clips)}:v=1:a=1[vout][aorig]")
+
+        audio_map = "[aorig]"
+        if use_music:
+            mv = max(0.0, min(3.0, float(audio.get("musicVolume", 0.35))))
+            mf = f"[{music_idx}:a]volume={mv:.3f}"
+            if not audio.get("loop"):
+                mf += ",apad"
+            mf += "[amusic]"
+            filters.append(mf)
+            if audio.get("mode") == "replace_with_music":
+                audio_map = "[amusic]"
+            else:
+                filters.append("[aorig][amusic]amix=inputs=2:duration=first:dropout_transition=2[aout]")
+                audio_map = "[aout]"
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        # ── FFmpeg-Befehl (#8.6 -movflags +faststart) ────────────────────────
+        cmd = [
+            "ffmpeg", "-hide_banner",
+            "-y" if overwrite else "-n",
+            *input_args,
+            "-filter_complex", ";".join(filters),
+            "-map", "[vout]",
+            "-map", audio_map,
+            "-c:v", "libx264", "-crf", "22", "-preset", "fast",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        _log(f"FFmpeg startet ({len(clips)} Clips, audio={audio.get('mode', 'original')})")
+
+        # ── subprocess.Popen für Cancellability (#13) ─────────────────────────
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        with _render_lock:
+            _current_render_process = proc
+        _, stderr = proc.communicate()
+        rc = proc.returncode
+        with _render_lock:
+            _current_render_process = None
+
+        with _lock:
+            cancelled = _cancel_flag
+            if cancelled:
+                _cancel_flag = False
+
+        if cancelled:
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except Exception:
+                    pass
+            _set(state="idle", error="Render abgebrochen")
+            _log("Render abgebrochen durch Benutzer")
+            return {"success": False, "error": "cancelled"}
+
+        if rc != 0:
+            err = (stderr or "FFmpeg fehlgeschlagen")[-800:]
+            _log(f"FFmpeg Fehler (rc={rc}): {err[-300:]}")
+            _set(state="idle", error=err[-200:])
+            return {"success": False, "error": err}
+
+        if not os.path.exists(output_path) or os.path.getsize(output_path) < 1024:
+            err = "FFmpeg: Ausgabedatei fehlt oder leer"
+            _set(state="idle", error=err)
+            return {"success": False, "error": err}
+
+        size_bytes = os.path.getsize(output_path)
+        size_str = format_bytes(size_bytes)
+        _log(f"Render fertig: {os.path.basename(output_path)} ({size_str})")
+
+        # ── Quelldateien verschieben ──────────────────────────────────────────
+        if move_sources_to:
+            try:
+                dest_dir = validate_data_path(_remap(move_sources_to))
+                os.makedirs(dest_dir, exist_ok=True)
+                seen: set = set()
+                for c in clips:
+                    src = _remap(c.get("path", ""))
+                    if not src or src in seen or not os.path.exists(src):
+                        continue
+                    seen.add(src)
+                    base = os.path.basename(src)
+                    dest = os.path.join(dest_dir, base)
+                    if os.path.exists(dest):
+                        stem, ext = os.path.splitext(base)
+                        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        dest = os.path.join(dest_dir, f"{stem}_{ts}{ext}")
+                    os.rename(src, dest)
+                    _log(f"Verschoben: {base} → 04_done")
+            except Exception as exc:
+                _log(f"Quelldateien verschieben fehlgeschlagen: {exc}")
+
+        # ── Blur-Zwischendateien löschen ──────────────────────────────────────
+        for p in cleanup_paths:
+            try:
+                rp = validate_data_path(_remap(p))
+                if os.path.exists(rp):
+                    os.remove(rp)
+                    _log(f"Bereinigt: {os.path.basename(rp)}")
+            except Exception as exc:
+                _log(f"Bereinigung fehlgeschlagen: {exc}")
+
+        _set(state="idle", error="")
+        return {
+            "success": True,
+            "out_path": output_path,
+            "out_name": os.path.basename(output_path),
+            "size": size_str,
+            "size_bytes": size_bytes,
+        }
+
+    except Exception as exc:
+        err = str(exc)[:500]
+        _log(f"Render-Fehler: {err}")
+        _set(state="idle", error=err[:200])
+        return {"success": False, "error": err}
+
+
+@app.post("/render")
+def render_endpoint(data: dict):
+    with _lock:
+        if _status["state"] != "idle":
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Job läuft bereits", "state": _status["state"]},
+            )
+        _status["state"] = "queued"
+    return _run_render_task(data)
 
 
 @app.post("/job-control")
@@ -834,6 +1129,9 @@ def api_models_refresh():
     return {"ok": True, "count": len(cat.get("models", [])), "source": cat.get("source", "")}
 
 
+def _validate_model_id(model_id: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9._-]{1,80}", model_id))
+
 @app.post("/api/models/install")
 def api_models_install(data: dict, bg: BackgroundTasks):
     model_id = data.get("id", "").strip()
@@ -841,6 +1139,8 @@ def api_models_install(data: dict, bg: BackgroundTasks):
     hf_token = data.get("hf_token", "").strip()
     if not model_id or not url:
         return {"error": "id und url erforderlich"}
+    if not _validate_model_id(model_id):
+        return {"error": "Ungültige model_id – nur A-Z, a-z, 0-9, ., _, - erlaubt (max. 80 Zeichen)"}
     bg.add_task(_install_model_bg, model_id, url, hf_token)
     return {"ok": True, "id": model_id}
 
@@ -881,11 +1181,43 @@ def api_config_set(data: dict):
     return {"ok": True}
 
 
+@app.post("/api/models/test")
+def api_models_test(data: dict):
+    import cv2
+    model_id = data.get("model_id", "").strip()
+    image_path_raw = data.get("image", "").strip()
+    if not model_id or not image_path_raw:
+        return {"error": "model_id und image erforderlich"}
+    if not _validate_model_id(model_id):
+        return {"error": "Ungültige model_id"}
+    try:
+        image_path = validate_data_path(_remap(image_path_raw))
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+    model_file = _MODELS_PATH / f"{model_id}.onnx"
+    if not model_file.exists():
+        return {"error": f"Modell nicht gefunden: {model_id}"}
+    try:
+        import onnxruntime as ort
+        sess = ort.InferenceSession(str(model_file), providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+        frame = cv2.imread(image_path)
+        if frame is None:
+            return {"error": f"Bild konnte nicht geladen werden: {image_path}"}
+        boxes = _yolov8_detect(sess, frame, conf_thresh=0.3)
+        return {"detections": len(boxes), "boxes": [[int(v) for v in b] for b in boxes]}
+    except Exception as exc:
+        return {"error": str(exc)[:300]}
+
+
 @app.delete("/api/models/{model_id}")
 def api_models_delete(model_id: str):
+    if not _validate_model_id(model_id):
+        return {"error": "Ungültige model_id"}
     if model_id == "builtin-centerface":
         return {"error": "Integriertes Modell kann nicht gelöscht werden"}
-    target = _MODELS_PATH / f"{model_id}.onnx"
+    target = (_MODELS_PATH / f"{model_id}.onnx").resolve()
+    if DATA_ROOT not in target.parents:
+        return {"error": "Ungültiger Pfad"}
     if not target.exists():
         return {"error": "Modell nicht gefunden"}
     target.unlink()
@@ -1015,8 +1347,15 @@ def process_jobs(jobs: list, resume_url: str, status_url: str = "", full_job: di
 
     try:
         for i, job in enumerate(jobs, 1):
-            input_path = _remap(job.get("input_path", ""))
-            output_path = _remap(job.get("output_path", ""))
+            try:
+                input_path = validate_data_path(_remap(job.get("input_path", "")))
+                output_path = validate_data_path(_remap(job.get("output_path", "")))
+            except RuntimeError as exc:
+                err = str(exc)
+                _log(f"[{i}/{total}] Pfadfehler: {err}")
+                errors.append({"input": job.get("input_path", ""), "error": err})
+                post_status(status_url, {"event": "error", "current": i, "total": total, "name": "", "error": err})
+                continue
             blur_faces = job.get("blur_faces", False)
             blur_plates = job.get("blur_plates", False)
             name = os.path.basename(input_path)
@@ -1062,7 +1401,8 @@ def process_jobs(jobs: list, resume_url: str, status_url: str = "", full_job: di
                 post_status(status_url, {"event": "error", "current": i, "total": total, "name": name, "error": err[:500]})
     finally:
         _log(f"Blur abgeschlossen. Fehler: {len(errors)}")
-        _set(state="idle", error=errors[0]["error"][:200] if errors else "",
+        final_state = "cancelled" if was_cancelled else ("error" if errors else "idle")
+        _set(state=final_state, error=errors[0]["error"][:200] if errors else "",
              frame_current=0, frame_total=0, frame_pct=0, eta_seconds=0, started_at_ts=0.0)
         post_status(status_url, {"event": "done", "total": total, "errors": errors})
 
@@ -1156,18 +1496,14 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
         plate_model_id = cfg.get("plate_model")
         if not plate_model_id:
             if mode == "plates":
-                _log("Kein Kennzeichen-Modell aktiv – Datei wird kopiert.")
-                subprocess.run(["cp", "--", input_path, output_path], check=True)
-                return
+                raise RuntimeError("Kennzeichen-Blur angefordert, aber kein Kennzeichen-Modell aktiv. Job abgebrochen.")
             else:
                 _log("Kein Kennzeichen-Modell aktiv – nur Gesichter werden verarbeitet.")
         else:
             plate_model_file = _MODELS_PATH / f"{plate_model_id}.onnx"
             if not plate_model_file.exists():
                 if mode == "plates":
-                    _log(f"Kennzeichen-Modell nicht gefunden ({plate_model_id}) – Datei wird kopiert.")
-                    subprocess.run(["cp", "--", input_path, output_path], check=True)
-                    return
+                    raise RuntimeError(f"Kennzeichen-Modell '{plate_model_id}' nicht gefunden. Job abgebrochen.")
                 else:
                     _log(f"Kennzeichen-Modell nicht gefunden ({plate_model_id}) – nur Gesichter.")
                     plate_model_file = None
@@ -1300,8 +1636,7 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
         except Exception as exc:
             _log(f"Kennzeichen-Modell Ladefehler: {exc}")
             if mode == "plates":
-                subprocess.run(["cp", "--", input_path, output_path], check=True)
-                return
+                raise RuntimeError(f"Kennzeichen-Modell konnte nicht geladen werden: {exc}") from exc
 
     # ── PyAV Ausgabe-Container ────────────────────────────────────────────────
     wakeup_disk(input_path)
@@ -1512,6 +1847,7 @@ def run_deface(input_path: str, output_path: str, mode: str = "faces",
         if mode in ("faces", "both"):
             if total_face_detections == 0:
                 _log("WARNUNG: Kein Gesicht erkannt! CenterFace evtl. fehlerhaft geladen.")
+                post_status(status_url, {"event": "warning_no_detections", "name": job_name, "mode": mode})
             else:
                 if face_bbox_areas:
                     avg_a = sum(face_bbox_areas) / len(face_bbox_areas)

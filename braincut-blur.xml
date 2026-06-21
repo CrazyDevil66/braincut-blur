@@ -41,11 +41,20 @@
   <Config Name="N8N Server IP"
           Target="N8N_SERVER_IP"
           Default=""
-          Description="IP:Port des N8N-Servers, z.B. 192.168.1.100:5678 (für Callback-URLs)"
+          Description="Nur IP-Adresse des N8N-Servers, z.B. 192.168.1.100 (ohne Port!)"
           Type="Variable"
           Display="always"
           Required="false"
           Mask="false"></Config>
+
+  <Config Name="N8N Server Port"
+          Target="N8N_SERVER_PORT"
+          Default="5678"
+          Description="Port des N8N-Servers (Standard: 5678)"
+          Type="Variable"
+          Display="always"
+          Required="false"
+          Mask="false">5678</Config>
 
   <Config Name="Media Host Pfad"
           Target="MEDIA_HOST_PATH"
