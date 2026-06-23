@@ -281,6 +281,7 @@ pub fn process_jobs(
     {
         let mut s = state.lock().unwrap();
         s.state = final_state.into();
+        s.sub_state = String::new();
         s.error = errors.first()
             .and_then(|e| e.get("error"))
             .and_then(|v| v.as_str())
@@ -407,6 +408,7 @@ pub fn run_deface(
     };
 
     slog(&state, &format!("deface [{mode}] startet: {}", Path::new(input_path).file_name().unwrap_or_default().to_string_lossy()));
+    { state.lock().unwrap().sub_state = "probe".into(); }
 
     if !std::path::Path::new(input_path).exists() {
         bail!("Datei nicht gefunden: {input_path}\nPrüfe ob das Volume korrekt gemountet ist.");
@@ -431,9 +433,9 @@ pub fn run_deface(
 
     let (in_h, in_w) = if detection_res == "native" { (h, w) } else { (in_h, in_w) };
 
-    // TRT/CUDA availability
-    let use_trt = std::path::Path::new("/usr/local/cuda").exists()
-        && std::env::var("ORT_DISABLE_TRT").map(|v| v != "1").unwrap_or(true);
+    // TRT dauert beim ersten Lauf ohne Cache-Engine 5–10 Min → grundsätzlich deaktiviert.
+    // Kann per ORT_ENABLE_TRT=1 aktiviert werden (nur sinnvoll mit persistentem Cache-Volume).
+    let use_trt = std::env::var("ORT_ENABLE_TRT").map(|v| v == "1").unwrap_or(false);
 
     {
         let mut s = state.lock().unwrap();
@@ -451,6 +453,7 @@ pub fn run_deface(
         None
     };
 
+    { state.lock().unwrap().sub_state = "load_models".into(); }
     let mut detectors = Detectors::load(
         cf_path,
         face_yolo_path.as_deref(),
@@ -507,14 +510,14 @@ pub fn run_deface(
     let mut proc_dec = Command::new("ffmpeg")
         .args(&dec_args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()
         .context("FFmpeg Decoder starten")?;
 
     let mut proc_enc = Command::new("ffmpeg")
         .args(&enc_args)
         .stdin(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()
         .context("FFmpeg Encoder starten")?;
 
@@ -541,9 +544,10 @@ pub fn run_deface(
     let enc_stdin = proc_enc.stdin.take().expect("encoder stdin");
 
     // Frame loop – runs in this thread (blocking I/O)
+    { state.lock().unwrap().sub_state = "blur_loop".into(); }
     let result: Result<()> = (|| {
-        let mut dec_reader = std::io::BufReader::with_capacity(frame_size * 4, dec_stdout);
-        let mut enc_writer = std::io::BufWriter::with_capacity(frame_size * 4, enc_stdin);
+        let mut dec_reader = std::io::BufReader::with_capacity(frame_size, dec_stdout);
+        let mut enc_writer = enc_stdin;
 
         loop {
             match dec_reader.read_exact(&mut buf) {
@@ -560,12 +564,19 @@ pub fn run_deface(
             frame_idx += 1;
             let should_detect = (frame_idx - 1) % det_interval == 0;
 
+            if frame_idx <= 3 {
+                eprintln!("[LOOP] Frame {frame_idx} gelesen ({} bytes)", buf.len());
+            }
+
             if should_detect {
                 if mode == "faces" || mode == "both" {
+                    if frame_idx <= 3 { eprintln!("[LOOP] Frame {frame_idx} detect_faces start"); }
                     last_face_dets = detectors.detect_faces(&buf, w, h);
                     total_faces += last_face_dets.len() as u64;
+                    if frame_idx <= 3 { eprintln!("[LOOP] Frame {frame_idx} detect_faces done: {} Gesichter", last_face_dets.len()); }
                 }
                 if mode == "plates" || mode == "both" {
+                    if frame_idx <= 3 { eprintln!("[LOOP] Frame {frame_idx} detect_plates start"); }
                     // Decay existing plate buffer
                     plate_buf.retain(|_, (_, ttl)| { *ttl = ttl.saturating_sub(1); *ttl > 0 });
                     let new_plates = detectors.detect_plates(&buf, w, h, conf_thresh);
@@ -574,6 +585,7 @@ pub fn run_deface(
                         plate_buf.insert(key, (bp, PLATE_TTL));
                     }
                     total_plates += plate_buf.len() as u64;
+                    if frame_idx <= 3 { eprintln!("[LOOP] Frame {frame_idx} detect_plates done: {} Kennzeichen", plate_buf.len()); }
                 }
             } else if mode == "plates" || mode == "both" {
                 // Decay plate buffer every frame
@@ -581,10 +593,15 @@ pub fn run_deface(
             }
 
             // Apply face blur
+            let max_face_w = w / 5;
+            let max_face_h = h / 5;
             for &BBox { x, y, x2, y2 } in &last_face_dets {
                 let rw = x2 - x;
                 let rh = y2 - y;
                 if rw < 50 || rh < 50 {
+                    continue;
+                }
+                if rw > max_face_w || rh > max_face_h {
                     continue;
                 }
                 gaussian_blur_roi(&mut buf, w, x, y, x2, y2);
@@ -595,7 +612,9 @@ pub fn run_deface(
                 pixelate_roi(&mut buf, w, bp.x, bp.y, bp.x2, bp.y2);
             }
 
+            if frame_idx <= 3 { eprintln!("[LOOP] Frame {frame_idx} enc_writer.write_all start"); }
             enc_writer.write_all(&buf).context("Encoder schreiben")?;
+            if frame_idx <= 3 { eprintln!("[LOOP] Frame {frame_idx} enc_writer.write_all done"); }
 
             // Progress
             let elapsed = start.elapsed().as_secs_f64();
@@ -652,6 +671,7 @@ pub fn run_deface(
     {
         let mut s = state.lock().unwrap();
         s.state = "render".into();
+        s.sub_state = "encode".into();
         s.out_name = Path::new(output_path).file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
@@ -691,6 +711,7 @@ pub fn run_deface(
         bail!("Encoder fehlgeschlagen: Ausgabedatei fehlt oder leer ({tmp_output})");
     }
 
+    { state.lock().unwrap().sub_state = "mux".into(); }
     slog(&state, "Audio-Mux läuft...");
 
     // Mux audio from original (encode used -an)
