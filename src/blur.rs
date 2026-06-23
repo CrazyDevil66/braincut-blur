@@ -564,19 +564,12 @@ pub fn run_deface(
             frame_idx += 1;
             let should_detect = (frame_idx - 1) % det_interval == 0;
 
-            if frame_idx <= 3 {
-                eprintln!("[LOOP] Frame {frame_idx} gelesen ({} bytes)", buf.len());
-            }
-
             if should_detect {
                 if mode == "faces" || mode == "both" {
-                    if frame_idx <= 3 { eprintln!("[LOOP] Frame {frame_idx} detect_faces start"); }
                     last_face_dets = detectors.detect_faces(&buf, w, h);
                     total_faces += last_face_dets.len() as u64;
-                    if frame_idx <= 3 { eprintln!("[LOOP] Frame {frame_idx} detect_faces done: {} Gesichter", last_face_dets.len()); }
                 }
                 if mode == "plates" || mode == "both" {
-                    if frame_idx <= 3 { eprintln!("[LOOP] Frame {frame_idx} detect_plates start"); }
                     // Decay existing plate buffer
                     plate_buf.retain(|_, (_, ttl)| { *ttl = ttl.saturating_sub(1); *ttl > 0 });
                     let new_plates = detectors.detect_plates(&buf, w, h, conf_thresh);
@@ -585,7 +578,6 @@ pub fn run_deface(
                         plate_buf.insert(key, (bp, PLATE_TTL));
                     }
                     total_plates += plate_buf.len() as u64;
-                    if frame_idx <= 3 { eprintln!("[LOOP] Frame {frame_idx} detect_plates done: {} Kennzeichen", plate_buf.len()); }
                 }
             } else if mode == "plates" || mode == "both" {
                 // Decay plate buffer every frame
@@ -612,9 +604,7 @@ pub fn run_deface(
                 pixelate_roi(&mut buf, w, bp.x, bp.y, bp.x2, bp.y2);
             }
 
-            if frame_idx <= 3 { eprintln!("[LOOP] Frame {frame_idx} enc_writer.write_all start"); }
             enc_writer.write_all(&buf).context("Encoder schreiben")?;
-            if frame_idx <= 3 { eprintln!("[LOOP] Frame {frame_idx} enc_writer.write_all done"); }
 
             // Progress
             let elapsed = start.elapsed().as_secs_f64();
