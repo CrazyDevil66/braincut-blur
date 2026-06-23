@@ -89,6 +89,7 @@ async fn status_handler(State(app): State<App>) -> Json<Value> {
         "hw_nvdec": s.hw_nvdec,
         "hw_nvenc": s.hw_nvenc,
         "hw_trt": s.hw_trt,
+        "sub_state": s.sub_state,
         "out_name": s.out_name,
         "started_at": s.started_at,
         "started_at_ts": s.started_at_ts,
