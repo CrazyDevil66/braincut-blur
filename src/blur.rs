@@ -543,6 +543,15 @@ pub fn run_deface(
     let dec_stdout = proc_dec.stdout.take().expect("decoder stdout");
     let enc_stdin = proc_enc.stdin.take().expect("encoder stdin");
 
+    // Detection log (CSV next to output file)
+    let det_log_path = format!("{output_path}.detections.csv");
+    let mut det_log: Option<std::io::BufWriter<std::fs::File>> = std::fs::File::create(&det_log_path)
+        .ok()
+        .map(std::io::BufWriter::new);
+    if let Some(ref mut log) = det_log {
+        let _ = writeln!(log, "frame,model,x,y,w,h,rel_w_pct,rel_h_pct,applied");
+    }
+
     // Frame loop – runs in this thread (blocking I/O)
     { state.lock().unwrap().sub_state = "blur_loop".into(); }
     let result: Result<()> = (|| {
@@ -568,6 +577,15 @@ pub fn run_deface(
                 if mode == "faces" || mode == "both" {
                     last_face_dets = detectors.detect_faces(&buf, w, h);
                     total_faces += last_face_dets.len() as u64;
+                    if let Some(ref mut log) = det_log {
+                        for &BBox { x, y, x2, y2 } in &last_face_dets {
+                            let dw = x2 - x; let dh = y2 - y;
+                            let applied = dw >= 50 && dh >= 50 && dw <= w/5 && dh <= h/5;
+                            let _ = writeln!(log, "{frame_idx},face,{x},{y},{dw},{dh},{:.1},{:.1},{}",
+                                dw as f32 / w as f32 * 100.0, dh as f32 / h as f32 * 100.0,
+                                if applied { 1 } else { 0 });
+                        }
+                    }
                 }
                 if mode == "plates" || mode == "both" {
                     // Decay existing plate buffer
@@ -575,6 +593,12 @@ pub fn run_deface(
                     let new_plates = detectors.detect_plates(&buf, w, h, conf_thresh);
                     for bp in new_plates {
                         let key = (bp.x / grid, bp.y / grid, bp.x2 / grid, bp.y2 / grid);
+                        if let Some(ref mut log) = det_log {
+                            let dw = bp.x2 - bp.x; let dh = bp.y2 - bp.y;
+                            let _ = writeln!(log, "{frame_idx},plate,{},{},{dw},{dh},{:.1},{:.1},1",
+                                bp.x, bp.y,
+                                dw as f32 / w as f32 * 100.0, dh as f32 / h as f32 * 100.0);
+                        }
                         plate_buf.insert(key, (bp, PLATE_TTL));
                     }
                     total_plates += plate_buf.len() as u64;
