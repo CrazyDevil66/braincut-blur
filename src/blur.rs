@@ -270,25 +270,22 @@ pub fn process_jobs(
     }
 
     slog(&state, &format!("Blur abgeschlossen. Fehler: {}", errors.len()));
-    let final_state = if was_cancelled {
-        "cancelled"
-    } else if errors.is_empty() {
-        "idle"
-    } else {
-        "error"
-    };
 
     {
         let mut s = state.lock().unwrap();
-        s.state = final_state.into();
+        s.state = "idle".into();
         s.sub_state = String::new();
-        s.error = errors.first()
-            .and_then(|e| e.get("error"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .chars()
-            .take(200)
-            .collect();
+        s.error = if was_cancelled {
+            "Abgebrochen".into()
+        } else {
+            errors.first()
+                .and_then(|e| e.get("error"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .chars()
+                .take(200)
+                .collect()
+        };
         s.frame_current = 0;
         s.frame_total = 0;
         s.frame_pct = 0;
@@ -311,9 +308,12 @@ pub fn process_jobs(
         }
     }
 
-    // Completion webhook
-    if !cfg.completion_webhook.is_empty() && !was_cancelled {
-        let mut payload = serde_json::json!({ "status": "done", "errors": errors });
+    // Completion webhook (auch bei Abbruch senden damit N8N zurücksetzen kann)
+    if !cfg.completion_webhook.is_empty() {
+        let mut payload = serde_json::json!({
+            "status": if was_cancelled { "cancelled" } else { "done" },
+            "errors": errors
+        });
         if let Some(fj) = full_job {
             payload["fullJob"] = fj;
         }
