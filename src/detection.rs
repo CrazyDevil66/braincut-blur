@@ -91,7 +91,7 @@ impl Detectors {
             yolo_detect(sess, frame, fw, fh, 0.45, false, &mut self.yolo_resize_buf).unwrap_or_default()
         } else if self.centerface.is_some() {
             let sess = self.centerface.as_mut().unwrap();
-            match centerface_detect(sess, frame, fw, fh, in_h, in_w, 0.75, &mut self.cf_resize_buf) {
+            match centerface_detect(sess, frame, fw, fh, in_h, in_w, 0.65, &mut self.cf_resize_buf) {
                 Ok(boxes) => boxes.into_iter().map(|b| expand_bbox(b, fw, fh, 0.15)).collect(),
                 Err(e) => {
                     static ERR_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

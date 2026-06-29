@@ -532,7 +532,7 @@ pub fn run_deface(
 
     // Plate buffer: key=(x/grid,y/grid,x2/grid,y2/grid), value=(bbox, ttl)
     let mut plate_buf: HashMap<(usize, usize, usize, usize), (BBox, u32)> = HashMap::new();
-    const PLATE_TTL: u32 = 20;
+    const PLATE_TTL: u32 = 80;
 
     let mut total_faces: u64 = 0;
     let mut total_plates: u64 = 0;
