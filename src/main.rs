@@ -314,6 +314,7 @@ async fn api_config_get(State(app): State<App>) -> Json<Value> {
     Json(json!({
         "detection_interval": cfg_val.get("detection_interval").and_then(|v| v.as_u64()).unwrap_or(app.cfg.detection_interval as u64),
         "plate_conf_thresh": cfg_val.get("plate_conf_thresh").and_then(|v| v.as_f64()).unwrap_or(app.cfg.plate_conf_thresh as f64),
+        "face_conf_thresh": cfg_val.get("face_conf_thresh").and_then(|v| v.as_f64()).unwrap_or(app.cfg.face_conf_thresh as f64),
     }))
 }
 
@@ -328,6 +329,10 @@ async fn api_config_set(
     if let Some(v) = data.get("plate_conf_thresh").and_then(|v| v.as_f64()) {
         let clamped = (v.clamp(0.3, 0.8) * 100.0).round() / 100.0;
         cfg_val["plate_conf_thresh"] = json!(clamped);
+    }
+    if let Some(v) = data.get("face_conf_thresh").and_then(|v| v.as_f64()) {
+        let clamped = (v.clamp(0.3, 0.9) * 100.0).round() / 100.0;
+        cfg_val["face_conf_thresh"] = json!(clamped);
     }
     if let Err(e) = models::save_model_config(&app.cfg, &cfg_val) {
         return json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());

@@ -45,9 +45,11 @@ pub fn build_session(model_path: &Path, use_trt: bool) -> Result<Session> {
 pub struct Detectors {
     pub centerface: Option<Session>,
     pub face_yolo: Option<Session>,
+    pub face_scrfd: Option<Session>,
     pub plate_yolo: Option<Session>,
     pub in_h: usize,
     pub in_w: usize,
+    pub face_conf_thresh: f32,
     // Pre-allocated resize scratch buffers — eliminates ~4 MB malloc/free per Detection-Frame.
     // ORT still needs an owned Vec for tensor data, so only the resize step is saved here.
     cf_resize_buf: Vec<u8>,   // cf_pad_h * cf_pad_w * 3
@@ -58,16 +60,21 @@ impl Detectors {
     pub fn load(
         centerface_path: Option<&Path>,
         face_yolo_path: Option<&Path>,
+        face_scrfd_path: Option<&Path>,
         plate_yolo_path: Option<&Path>,
         in_h: usize,
         in_w: usize,
         use_trt: bool,
+        face_conf_thresh: f32,
     ) -> Result<Self> {
         let centerface = centerface_path
             .map(|p| build_session(p, false))
             .transpose()?;
         let face_yolo = face_yolo_path
             .map(|p| build_session(p, use_trt))
+            .transpose()?;
+        let face_scrfd = face_scrfd_path
+            .map(|p| build_session(p, false))
             .transpose()?;
         let plate_yolo = plate_yolo_path
             .map(|p| build_session(p, use_trt))
@@ -77,21 +84,30 @@ impl Detectors {
         let cf_pad_w = ((in_w + 31) / 32) * 32;
 
         Ok(Self {
-            centerface, face_yolo, plate_yolo, in_h, in_w,
+            centerface, face_yolo, face_scrfd, plate_yolo, in_h, in_w,
+            face_conf_thresh,
             cf_resize_buf: vec![0u8; cf_pad_h * cf_pad_w * 3],
             yolo_resize_buf: vec![0u8; 640 * 640 * 3],
         })
     }
 
     pub fn detect_faces(&mut self, frame: &[u8], fw: usize, fh: usize) -> Vec<BBox> {
+        let thresh = self.face_conf_thresh;
         let in_h = self.in_h;
         let in_w = self.in_w;
-        if self.face_yolo.is_some() {
+        if self.face_scrfd.is_some() {
+            let sess = self.face_scrfd.as_mut().unwrap();
+            scrfd_detect(sess, frame, fw, fh, thresh, &mut self.yolo_resize_buf)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|b| expand_bbox(b, fw, fh, 0.10))
+                .collect()
+        } else if self.face_yolo.is_some() {
             let sess = self.face_yolo.as_mut().unwrap();
-            yolo_detect(sess, frame, fw, fh, 0.45, false, &mut self.yolo_resize_buf).unwrap_or_default()
+            yolo_detect(sess, frame, fw, fh, thresh, false, &mut self.yolo_resize_buf).unwrap_or_default()
         } else if self.centerface.is_some() {
             let sess = self.centerface.as_mut().unwrap();
-            match centerface_detect(sess, frame, fw, fh, in_h, in_w, 0.65, &mut self.cf_resize_buf) {
+            match centerface_detect(sess, frame, fw, fh, in_h, in_w, thresh, &mut self.cf_resize_buf) {
                 Ok(boxes) => boxes.into_iter().map(|b| expand_bbox(b, fw, fh, 0.15)).collect(),
                 Err(e) => {
                     static ERR_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -271,6 +287,109 @@ fn expand_bbox(b: BBox, fw: usize, fh: usize, factor: f32) -> BBox {
         x2: (b.x2 + ex).min(fw.saturating_sub(1)),
         y2: (b.y2 + ey).min(fh.saturating_sub(1)),
     }
+}
+
+// ── SCRFD (InsightFace) ───────────────────────────────────────────────────────
+
+fn scrfd_detect(
+    session: &mut Session,
+    frame: &[u8],
+    frame_w: usize,
+    frame_h: usize,
+    threshold: f32,
+    resize_buf: &mut [u8],
+) -> Result<Vec<BBox>> {
+    let in_h = 640usize;
+    let in_w = 640usize;
+
+    resize_bgr_into(frame, frame_w, frame_h, in_w, in_h, resize_buf);
+
+    // CHW, BGR→RGB, /255 (identisch zu YOLO)
+    let mut input = vec![0f32; 3 * in_h * in_w];
+    for y in 0..in_h {
+        for x in 0..in_w {
+            let s = (y * in_w + x) * 3;
+            input[y * in_w + x] = resize_buf[s + 2] as f32 / 255.0; // R
+            input[in_h * in_w + y * in_w + x] = resize_buf[s + 1] as f32 / 255.0; // G
+            input[2 * in_h * in_w + y * in_w + x] = resize_buf[s] as f32 / 255.0; // B
+        }
+    }
+
+    let tensor = Tensor::from_array(([1i64, 3, in_h as i64, in_w as i64], input))?;
+    let outputs = session.run(ort::inputs![tensor])?;
+
+    // SCRFD ONNX (buffalo_l / buffalo_sc) gibt pro Stride [scores, boxes] aus,
+    // optional mit KPS: dann [scores, boxes, kps] → 6 oder 9 Outputs.
+    // Stride-Reihenfolge: 8, 16, 32; 2 Anchors pro Zelle.
+    let has_kps = outputs.len() == 9;
+    let step = if has_kps { 3 } else { 2 };
+    let strides = [8usize, 16, 32];
+
+    let scale_x = frame_w as f32 / in_w as f32;
+    let scale_y = frame_h as f32 / in_h as f32;
+
+    let mut candidates: Vec<(BBox, f32)> = Vec::new();
+
+    for (si, &stride) in strides.iter().enumerate() {
+        let out_h = in_h / stride;
+        let out_w = in_w / stride;
+        let n_anchors = out_h * out_w * 2;
+
+        let (_, scores) = outputs[si * step].try_extract_tensor::<f32>()?;
+        let (_, boxes) = outputs[si * step + 1].try_extract_tensor::<f32>()?;
+
+        for i in 0..n_anchors {
+            let score = scores[i];
+            if score < threshold {
+                continue;
+            }
+            // 2 Anchors teilen sich dasselbe Gitterzentrum
+            let cell = i / 2;
+            let row = cell / out_w;
+            let col = cell % out_w;
+            let anchor_cx = col as f32 * stride as f32;
+            let anchor_cy = row as f32 * stride as f32;
+
+            // Distances [left, top, right, bottom] in Input-Pixeln
+            let b = i * 4;
+            let x1 = ((anchor_cx - boxes[b]) * scale_x) as isize;
+            let y1 = ((anchor_cy - boxes[b + 1]) * scale_y) as isize;
+            let x2 = ((anchor_cx + boxes[b + 2]) * scale_x) as isize;
+            let y2 = ((anchor_cy + boxes[b + 3]) * scale_y) as isize;
+
+            let x1 = x1.max(0) as usize;
+            let y1 = y1.max(0) as usize;
+            let x2 = (x2 as usize).min(frame_w);
+            let y2 = (y2 as usize).min(frame_h);
+
+            if x2 > x1 && y2 > y1 {
+                candidates.push((BBox { x: x1, y: y1, x2, y2 }, score));
+            }
+        }
+    }
+
+    // Greedy NMS (IoU 0.45)
+    candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut kept: Vec<BBox> = Vec::new();
+    'outer: for (b, _) in &candidates {
+        for kb in &kept {
+            let ix1 = b.x.max(kb.x);
+            let iy1 = b.y.max(kb.y);
+            let ix2 = b.x2.min(kb.x2);
+            let iy2 = b.y2.min(kb.y2);
+            if ix2 > ix1 && iy2 > iy1 {
+                let inter = ((ix2 - ix1) * (iy2 - iy1)) as f32;
+                let ua = ((b.x2 - b.x) * (b.y2 - b.y)) as f32
+                    + ((kb.x2 - kb.x) * (kb.y2 - kb.y)) as f32
+                    - inter;
+                if ua > 0.0 && inter / ua > 0.45 {
+                    continue 'outer;
+                }
+            }
+        }
+        kept.push(*b);
+    }
+    Ok(kept)
 }
 
 // ── YOLOv8 ───────────────────────────────────────────────────────────────────

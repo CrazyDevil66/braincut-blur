@@ -205,6 +205,10 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.25)}
         <input type="range" min="1" max="8" step="1" value="4" id="frameSkipSlider">
       </div>
       <div class="slider-row">
+        <div class="slider-top"><span class="slider-label">Gesichts-Konfidenz</span><span class="slider-val" id="faceConfVal">0.55</span></div>
+        <input type="range" min="0.30" max="0.90" step="0.05" value="0.55" id="faceConfSlider">
+      </div>
+      <div class="slider-row">
         <div class="slider-top"><span class="slider-label">Kennzeichen-Konfidenz</span><span class="slider-val" id="confVal">0.45</span></div>
         <input type="range" min="0.30" max="0.80" step="0.05" value="0.45" id="confSlider">
       </div>
@@ -310,7 +314,7 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.25)}
 <script>
 var lastF=0,lastFT=Date.now(),smoothFps=0,autoScroll=true;
 var settingsData=null,activeTab='face',hfToken=localStorage.getItem('hf_token')||''
-var fpsHistory=[],configData={detection_interval:4,plate_conf_thresh:0.45};
+var fpsHistory=[],configData={detection_interval:4,plate_conf_thresh:0.45,face_conf_thresh:0.55};
 var sbVisible=false,sbHideTimer=null;
 var SB_KEYS=['probe','load_models','blur_loop','encode','mux'];
 
@@ -474,10 +478,13 @@ async function loadConfig(){
     var r=await fetch('/api/config');configData=await r.json();
     var fs=document.getElementById('frameSkipSlider'),cs=document.getElementById('confSlider');
     var fv=document.getElementById('frameSkipVal'),cv=document.getElementById('confVal');
+    var fcs=document.getElementById('faceConfSlider'),fcv=document.getElementById('faceConfVal');
     if(fs)fs.value=configData.detection_interval||4;
     if(fv)fv.textContent=configData.detection_interval||4;
     if(cs)cs.value=configData.plate_conf_thresh||0.45;
     if(cv)cv.textContent=(configData.plate_conf_thresh||0.45).toFixed(2);
+    if(fcs)fcs.value=configData.face_conf_thresh||0.55;
+    if(fcv)fcv.textContent=(configData.face_conf_thresh||0.55).toFixed(2);
   }catch(e){}
 }
 async function saveConfig(key,val){
@@ -536,6 +543,7 @@ async function refresh(){
   }
 }
 document.getElementById('frameSkipSlider').addEventListener('input',function(){var v=parseInt(this.value);document.getElementById('frameSkipVal').textContent=v;saveConfig('detection_interval',v);});
+document.getElementById('faceConfSlider').addEventListener('input',function(){var v=parseFloat(this.value);document.getElementById('faceConfVal').textContent=v.toFixed(2);saveConfig('face_conf_thresh',v);});
 document.getElementById('confSlider').addEventListener('input',function(){var v=parseFloat(this.value);document.getElementById('confVal').textContent=v.toFixed(2);saveConfig('plate_conf_thresh',v);});
 document.getElementById('gearBtn').addEventListener('click',openSettings);
 document.getElementById('drawerClose').addEventListener('click',closeSettings);

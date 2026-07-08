@@ -350,6 +350,10 @@ pub fn run_deface(
         .get("plate_conf_thresh")
         .and_then(|v| v.as_f64())
         .unwrap_or(cfg.plate_conf_thresh as f64) as f32;
+    let face_conf_thresh = model_cfg
+        .get("face_conf_thresh")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(cfg.face_conf_thresh as f64) as f32;
 
     // Resolve plate model
     let plate_model_path = if mode == "plates" || mode == "both" {
@@ -385,20 +389,26 @@ pub fn run_deface(
         .and_then(|v| v.as_str())
         .unwrap_or("builtin-centerface");
 
-    let face_yolo_path = if mode == "faces" || mode == "both" {
+    let is_scrfd = face_model_cfg.starts_with("scrfd-");
+    let (face_yolo_path, face_scrfd_path) = if mode == "faces" || mode == "both" {
         if face_model_cfg == "builtin-centerface" {
-            None
+            (None, None)
         } else {
             let p = cfg.models_path.join(format!("{face_model_cfg}.onnx"));
-            if p.exists() { Some(p) } else { None }
+            if p.exists() {
+                if is_scrfd { (None, Some(p)) } else { (Some(p), None) }
+            } else {
+                (None, None)
+            }
         }
     } else {
-        None
+        (None, None)
     };
 
     let use_centerface = (mode == "faces" || mode == "both")
         && face_model_cfg == "builtin-centerface"
-        && face_yolo_path.is_none();
+        && face_yolo_path.is_none()
+        && face_scrfd_path.is_none();
 
     // CenterFace detection resolution
     let (in_h, in_w) = match detection_res {
@@ -457,10 +467,12 @@ pub fn run_deface(
     let mut detectors = Detectors::load(
         cf_path,
         face_yolo_path.as_deref(),
+        face_scrfd_path.as_deref(),
         plate_model_path.as_deref(),
         in_h,
         in_w,
         use_trt,
+        face_conf_thresh,
     ).context("Detektoren laden")?;
 
     // FFmpeg hardware setup
@@ -532,11 +544,15 @@ pub fn run_deface(
 
     // Plate buffer: key=(x/grid,y/grid,x2/grid,y2/grid), value=(bbox, ttl)
     let mut plate_buf: HashMap<(usize, usize, usize, usize), (BBox, u32)> = HashMap::new();
-    const PLATE_TTL: u32 = 80;
+    const PLATE_TTL: u32 = 200;
+
+    // Face buffer: gleiche Logik wie Plate – hält Blur 0,6s nach letzter Erkennung
+    let mut face_buf: HashMap<(usize, usize, usize, usize), (BBox, u32)> = HashMap::new();
+    const FACE_TTL: u32 = 60;
+    const FACE_GRID: usize = 30;
 
     let mut total_faces: u64 = 0;
     let mut total_plates: u64 = 0;
-    let mut last_face_dets: Vec<BBox> = Vec::new();
 
     let grid = (cfg.plate_grid as usize).max(1);
 
@@ -575,20 +591,23 @@ pub fn run_deface(
 
             if should_detect {
                 if mode == "faces" || mode == "both" {
-                    last_face_dets = detectors.detect_faces(&buf, w, h);
-                    total_faces += last_face_dets.len() as u64;
-                    if let Some(ref mut log) = det_log {
-                        for &BBox { x, y, x2, y2 } in &last_face_dets {
-                            let dw = x2 - x; let dh = y2 - y;
-                            let applied = dw >= 50 && dh >= 50 && dw <= w/5 && dh <= h/5;
-                            let _ = writeln!(log, "{frame_idx},face,{x},{y},{dw},{dh},{:.1},{:.1},{}",
+                    face_buf.retain(|_, (_, ttl)| { *ttl = ttl.saturating_sub(1); *ttl > 0 });
+                    let new_faces = detectors.detect_faces(&buf, w, h);
+                    total_faces += new_faces.len() as u64;
+                    for bf in new_faces {
+                        let key = (bf.x / FACE_GRID, bf.y / FACE_GRID, bf.x2 / FACE_GRID, bf.y2 / FACE_GRID);
+                        if let Some(ref mut log) = det_log {
+                            let dw = bf.x2 - bf.x; let dh = bf.y2 - bf.y;
+                            let applied = dw >= 50 && dh >= 50 && dw <= w / 5 && dh <= h / 5;
+                            let _ = writeln!(log, "{frame_idx},face,{},{},{dw},{dh},{:.1},{:.1},{}",
+                                bf.x, bf.y,
                                 dw as f32 / w as f32 * 100.0, dh as f32 / h as f32 * 100.0,
                                 if applied { 1 } else { 0 });
                         }
+                        face_buf.insert(key, (bf, FACE_TTL));
                     }
                 }
                 if mode == "plates" || mode == "both" {
-                    // Decay existing plate buffer
                     plate_buf.retain(|_, (_, ttl)| { *ttl = ttl.saturating_sub(1); *ttl > 0 });
                     let new_plates = detectors.detect_plates(&buf, w, h, conf_thresh);
                     for bp in new_plates {
@@ -603,24 +622,29 @@ pub fn run_deface(
                     }
                     total_plates += plate_buf.len() as u64;
                 }
-            } else if mode == "plates" || mode == "both" {
-                // Decay plate buffer every frame
-                plate_buf.retain(|_, (_, ttl)| { *ttl = ttl.saturating_sub(1); *ttl > 0 });
+            } else {
+                // Nicht-Erkennungs-Frame: TTL beider Buffer dekrementieren
+                if mode == "faces" || mode == "both" {
+                    face_buf.retain(|_, (_, ttl)| { *ttl = ttl.saturating_sub(1); *ttl > 0 });
+                }
+                if mode == "plates" || mode == "both" {
+                    plate_buf.retain(|_, (_, ttl)| { *ttl = ttl.saturating_sub(1); *ttl > 0 });
+                }
             }
 
             // Apply face blur
             let max_face_w = w / 5;
             let max_face_h = h / 5;
-            for &BBox { x, y, x2, y2 } in &last_face_dets {
-                let rw = x2 - x;
-                let rh = y2 - y;
+            for (_, (bf, _)) in &face_buf {
+                let rw = bf.x2 - bf.x;
+                let rh = bf.y2 - bf.y;
                 if rw < 50 || rh < 50 {
                     continue;
                 }
                 if rw > max_face_w || rh > max_face_h {
                     continue;
                 }
-                gaussian_blur_roi(&mut buf, w, x, y, x2, y2);
+                gaussian_blur_roi(&mut buf, w, bf.x, bf.y, bf.x2, bf.y2);
             }
 
             // Apply plate pixelation
