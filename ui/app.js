@@ -203,6 +203,8 @@ async function loadConfig(){
     if(cv)cv.textContent=(configData.plate_conf_thresh||0.45).toFixed(2);
     if(fcs)fcs.value=configData.face_conf_thresh||0.2;
     if(fcv)fcv.textContent=(configData.face_conf_thresh||0.2).toFixed(2);
+    var fct=document.getElementById('faceComboToggle');
+    if(fct)fct.checked=configData.face_combo!==false;
   }catch(e){}
 }
 async function saveConfig(key,val){
@@ -266,6 +268,7 @@ async function refresh(){
 }
 document.getElementById('frameSkipSlider').addEventListener('input',function(){var v=parseInt(this.value);document.getElementById('frameSkipVal').textContent=v;saveConfig('detection_interval',v);});
 document.getElementById('faceConfSlider').addEventListener('input',function(){var v=parseFloat(this.value);document.getElementById('faceConfVal').textContent=v.toFixed(2);saveConfig('face_conf_thresh',v);});
+document.getElementById('faceComboToggle').addEventListener('change',function(){saveConfig('face_combo',this.checked);});
 document.getElementById('confSlider').addEventListener('input',function(){var v=parseFloat(this.value);document.getElementById('confVal').textContent=v.toFixed(2);saveConfig('plate_conf_thresh',v);});
 document.getElementById('gearBtn').addEventListener('click',openSettings);
 document.getElementById('drawerClose').addEventListener('click',closeSettings);

@@ -16,6 +16,8 @@ pub struct ResolvedModels {
     pub face_scrfd_path: Option<std::path::PathBuf>,
     pub plate_model_path: Option<std::path::PathBuf>,
     pub use_centerface: bool,
+    /// CenterFace läuft ergänzend zu SCRFD/YOLO (Kombi-Modus).
+    pub combo_centerface: bool,
 }
 
 pub fn resolve_models(model_cfg: &Value, mode: &str, cfg: &Config, state: &SharedState) -> Result<ResolvedModels> {
@@ -78,7 +80,10 @@ pub fn resolve_models(model_cfg: &Value, mode: &str, cfg: &Config, state: &Share
         ));
     }
 
-    Ok(ResolvedModels { face_model_name, face_yolo_path, face_scrfd_path, plate_model_path, use_centerface })
+    let combo_centerface = model_cfg.get("face_combo").and_then(|v| v.as_bool()).unwrap_or(cfg.face_combo)
+        && (face_yolo_path.is_some() || face_scrfd_path.is_some());
+
+    Ok(ResolvedModels { face_model_name, face_yolo_path, face_scrfd_path, plate_model_path, use_centerface, combo_centerface })
 }
 
 #[allow(clippy::too_many_arguments)]

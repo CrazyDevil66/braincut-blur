@@ -17,6 +17,9 @@ pub struct Config {
     pub plate_tile_rows: usize,
     pub face_tile_cols: usize,
     pub face_tile_rows: usize,
+    /// CenterFace zusätzlich zu SCRFD/YOLO laufen lassen und Treffer zusammenführen.
+    pub face_combo: bool,
+    pub face_combo_cf_thresh: f32,
     pub frame_buffer: usize,
 }
 
@@ -66,6 +69,8 @@ impl Config {
             plate_tile_rows: 2,
             face_tile_cols: 4,
             face_tile_rows: 3,
+            face_combo: true,
+            face_combo_cf_thresh: 0.5,
             frame_buffer: 32,
         }
     }

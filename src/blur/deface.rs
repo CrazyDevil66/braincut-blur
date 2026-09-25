@@ -86,10 +86,11 @@ pub fn run_deface(
     let use_trt = std::env::var("ORT_ENABLE_TRT").map(|v| v == "1").unwrap_or(false);
     { state.lock().unwrap().hw_trt = use_trt; }
 
-    let cf_path = if models.use_centerface && cfg.centerface_model.exists() {
+    let need_centerface = models.use_centerface || models.combo_centerface;
+    let cf_path = if need_centerface && cfg.centerface_model.exists() {
         slog(&state, &format!("CenterFace geladen: {} (in_shape={}x{})", cfg.centerface_model.display(), in_h, in_w));
         Some(cfg.centerface_model.as_path())
-    } else if models.use_centerface {
+    } else if need_centerface {
         slog(&state, &format!("WARNUNG: CenterFace-Modell nicht gefunden: {}", cfg.centerface_model.display()));
         None
     } else {
@@ -105,6 +106,11 @@ pub fn run_deface(
         in_h, in_w, use_trt, face_conf_thresh,
     ).context("Detektoren laden")?;
     detectors.face_tiles = face_tiles;
+    if models.combo_centerface && detectors.centerface.is_some() {
+        let t = model_cfg.get("face_combo_cf_thresh").and_then(|v| v.as_f64()).map(|v| v as f32).unwrap_or(cfg.face_combo_cf_thresh);
+        detectors.combo_cf_thresh = Some(t);
+        slog(&state, &format!("Kombi-Modus: CenterFace ergänzend ab {t:.2}"));
+    }
     if models.face_scrfd_path.is_some() && (mode == "faces" || mode == "both") {
         slog(&state, &format!("Gesichtserkennung SCRFD: Gesamtbild + {}×{} Kacheln", face_tiles.0, face_tiles.1));
     }

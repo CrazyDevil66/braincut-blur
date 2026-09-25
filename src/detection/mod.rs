@@ -36,6 +36,8 @@ pub struct Detectors {
     pub face_conf_thresh: f32,
     /// Kacheln für SCRFD (Spalten, Zeilen); (1, 1) = nur Gesamtbild.
     pub face_tiles: (usize, usize),
+    /// Kombi-Modus: CenterFace-Schwelle, mit der CenterFace ergänzend zum Hauptmodell läuft.
+    pub combo_cf_thresh: Option<f32>,
     cf_resize_buf: Vec<u8>,
     yolo_resize_buf: Vec<u8>,
 }
@@ -63,12 +65,39 @@ impl Detectors {
             centerface, face_yolo, face_scrfd, plate_yolo,
             in_h, in_w, face_conf_thresh,
             face_tiles: (1, 1),
+            combo_cf_thresh: None,
             cf_resize_buf: vec![0u8; cf_pad_h * cf_pad_w * 3],
             yolo_resize_buf: vec![0u8; 640 * 640 * 3],
         })
     }
 
     pub fn detect_faces(&mut self, frame: &[u8], fw: usize, fh: usize) -> Vec<BBox> {
+        let main = self.detect_faces_main(frame, fw, fh);
+        match self.combo_cf_thresh {
+            Some(t) if self.face_scrfd.is_some() || self.face_yolo.is_some() => {
+                let extra = self.detect_centerface(frame, fw, fh, t);
+                merge_faces(main, extra)
+            }
+            _ => main,
+        }
+    }
+
+    fn detect_centerface(&mut self, frame: &[u8], fw: usize, fh: usize, thresh: f32) -> Vec<BBox> {
+        let (in_h, in_w) = (self.in_h, self.in_w);
+        let Some(session) = self.centerface.as_mut() else { return vec![] };
+        match centerface_detect(session, frame, fw, fh, in_h, in_w, thresh, &mut self.cf_resize_buf) {
+            Ok(boxes) => boxes.into_iter().map(|b| expand_bbox(b, fw, fh, 0.15)).collect(),
+            Err(e) => {
+                static ERR_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !ERR_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!("[CF-ERROR] CenterFace Fehler (einmalig): {e:?}");
+                }
+                vec![]
+            }
+        }
+    }
+
+    fn detect_faces_main(&mut self, frame: &[u8], fw: usize, fh: usize) -> Vec<BBox> {
         let thresh = self.face_conf_thresh;
         if self.face_scrfd.is_some() {
             let (cols, rows) = self.face_tiles;
@@ -86,17 +115,7 @@ impl Detectors {
             yolo_detect(self.face_yolo.as_mut().unwrap(), frame, fw, fh, thresh, false, &mut self.yolo_resize_buf)
                 .unwrap_or_default()
         } else if self.centerface.is_some() {
-            let (in_h, in_w) = (self.in_h, self.in_w);
-            match centerface_detect(self.centerface.as_mut().unwrap(), frame, fw, fh, in_h, in_w, thresh, &mut self.cf_resize_buf) {
-                Ok(boxes) => boxes.into_iter().map(|b| expand_bbox(b, fw, fh, 0.15)).collect(),
-                Err(e) => {
-                    static ERR_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                    if !ERR_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        eprintln!("[CF-ERROR] CenterFace Fehler (einmalig): {e:?}");
-                    }
-                    vec![]
-                }
-            }
+            self.detect_centerface(frame, fw, fh, thresh)
         } else {
             vec![]
         }
@@ -115,6 +134,13 @@ impl Detectors {
     }
 }
 
+/// Führt die Treffer zweier Gesichtsmodelle zusammen: Boxen auf demselben Gesicht werden
+/// zu einer (die mit höherer Konfidenz bleibt), alle übrigen bleiben erhalten.
+fn merge_faces(a: Vec<BBox>, b: Vec<BBox>) -> Vec<BBox> {
+    let candidates = a.into_iter().chain(b).map(|x| (x, x.score)).collect();
+    nms::greedy_nms(candidates, 0.3, usize::MAX)
+}
+
 fn expand_bbox(b: BBox, fw: usize, fh: usize, factor: f32) -> BBox {
     let ex = (((b.x2.saturating_sub(b.x)) as f32 * factor) as usize).max(2);
     let ey = (((b.y2.saturating_sub(b.y)) as f32 * factor) as usize).max(2);
@@ -124,5 +150,33 @@ fn expand_bbox(b: BBox, fw: usize, fh: usize, factor: f32) -> BBox {
         x2: (b.x2 + ex).min(fw.saturating_sub(1)),
         y2: (b.y2 + ey).min(fh.saturating_sub(1)),
         score: b.score,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn b(x: usize, y: usize, s: usize, score: f32) -> BBox {
+        BBox { x, y, x2: x + s, y2: y + s, score }
+    }
+
+    #[test]
+    fn doppelte_treffer_werden_zu_einer_box() {
+        let m = merge_faces(vec![b(100, 100, 40, 0.8)], vec![b(104, 102, 44, 0.55)]);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].score, 0.8);
+    }
+
+    #[test]
+    fn getrennte_treffer_bleiben_erhalten() {
+        let m = merge_faces(vec![b(100, 100, 40, 0.8)], vec![b(900, 300, 30, 0.6), b(2000, 500, 50, 0.7)]);
+        assert_eq!(m.len(), 3);
+    }
+
+    #[test]
+    fn ohne_ergaenzung_bleibt_das_hauptergebnis() {
+        let m = merge_faces(vec![b(1, 1, 20, 0.9), b(500, 1, 20, 0.6)], vec![]);
+        assert_eq!(m.len(), 2);
     }
 }
