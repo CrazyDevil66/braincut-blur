@@ -107,6 +107,8 @@ pub async fn api_config_get(State(app): State<App>) -> Json<serde_json::Value> {
         "detection_interval": cfg_val.get("detection_interval").and_then(|v| v.as_u64()).unwrap_or(app.cfg.detection_interval as u64),
         "plate_conf_thresh": cfg_val.get("plate_conf_thresh").and_then(|v| v.as_f64()).unwrap_or(app.cfg.plate_conf_thresh as f64),
         "face_conf_thresh": cfg_val.get("face_conf_thresh").and_then(|v| v.as_f64()).unwrap_or(app.cfg.face_conf_thresh as f64),
+        "plate_tile_cols": cfg_val.get("plate_tile_cols").and_then(|v| v.as_u64()).unwrap_or(app.cfg.plate_tile_cols as u64),
+        "plate_tile_rows": cfg_val.get("plate_tile_rows").and_then(|v| v.as_u64()).unwrap_or(app.cfg.plate_tile_rows as u64),
     }))
 }
 
@@ -119,7 +121,12 @@ pub async fn api_config_set(State(app): State<App>, Json(data): Json<serde_json:
         cfg_val["plate_conf_thresh"] = json!((v.clamp(0.3, 0.8) * 100.0).round() / 100.0);
     }
     if let Some(v) = data.get("face_conf_thresh").and_then(|v| v.as_f64()) {
-        cfg_val["face_conf_thresh"] = json!((v.clamp(0.3, 0.9) * 100.0).round() / 100.0);
+        cfg_val["face_conf_thresh"] = json!((v.clamp(0.05, 0.9) * 100.0).round() / 100.0);
+    }
+    for key in ["plate_tile_cols", "plate_tile_rows"] {
+        if let Some(v) = data.get(key).and_then(|v| v.as_u64()) {
+            cfg_val[key] = json!(v.clamp(1, 4));
+        }
     }
     if let Err(e) = models::save_model_config(&app.cfg, &cfg_val) {
         return json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());

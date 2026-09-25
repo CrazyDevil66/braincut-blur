@@ -1,6 +1,6 @@
 var lastF=0,lastFT=Date.now(),smoothFps=0,autoScroll=true;
 var settingsData=null,activeTab='face',hfToken=localStorage.getItem('hf_token')||''
-var fpsHistory=[],configData={detection_interval:4,plate_conf_thresh:0.45,face_conf_thresh:0.55};
+var fpsHistory=[],configData={detection_interval:4,plate_conf_thresh:0.45,face_conf_thresh:0.2};
 var sbVisible=false,sbHideTimer=null;
 var previewTimer=null,previewActive=false;
 
@@ -201,8 +201,8 @@ async function loadConfig(){
     if(fv)fv.textContent=configData.detection_interval||4;
     if(cs)cs.value=configData.plate_conf_thresh||0.45;
     if(cv)cv.textContent=(configData.plate_conf_thresh||0.45).toFixed(2);
-    if(fcs)fcs.value=configData.face_conf_thresh||0.55;
-    if(fcv)fcv.textContent=(configData.face_conf_thresh||0.55).toFixed(2);
+    if(fcs)fcs.value=configData.face_conf_thresh||0.2;
+    if(fcv)fcv.textContent=(configData.face_conf_thresh||0.2).toFixed(2);
   }catch(e){}
 }
 async function saveConfig(key,val){

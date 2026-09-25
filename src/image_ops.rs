@@ -114,7 +114,8 @@ fn box_blur_roi(
     }
 }
 
-/// Pixelate ROI: downsample 10× then upsample back.
+/// Verpixelt den Ausschnitt mit Blöcken von einem Drittel seiner Höhe (mindestens 8 px),
+/// damit Schrift auf Kennzeichen auch bei großen Boxen nicht lesbar bleibt.
 pub fn pixelate_roi(
     frame: &mut [u8],
     frame_w: usize,
@@ -136,8 +137,9 @@ pub fn pixelate_roi(
     if roi_w < 2 || roi_h < 2 {
         return;
     }
-    let bw = (roi_w / 10).max(1);
-    let bh = (roi_h / 10).max(1);
+    let block = (roi_h / 3).max(8);
+    let bw = roi_w.div_ceil(block).max(1);
+    let bh = roi_h.div_ceil(block).max(1);
 
     // Downsample: average bw×bh blocks
     let mut small = vec![0u8; bw * bh * 3];
@@ -181,5 +183,25 @@ pub fn pixelate_roi(
                 frame[px + 2] = small[src + 2];
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verpixelung_nutzt_bloecke_nach_der_hoehe() {
+        let (w, h) = (400usize, 200usize);
+        let original: Vec<u8> = (0..w * h * 3).map(|i| (i % 251) as u8).collect();
+        let mut frame = original.clone();
+        // Box 300×90 → Blöcke von 30 px
+        pixelate_roi(&mut frame, w, 50, 50, 350, 140);
+        let px = |f: &[u8], x: usize, y: usize| f[(y * w + x) * 3..(y * w + x) * 3 + 3].to_vec();
+        assert_eq!(px(&frame, 50, 50), px(&frame, 79, 79));
+        assert_ne!(px(&frame, 50, 50), px(&frame, 80, 50));
+        assert_ne!(px(&frame, 50, 50), px(&frame, 50, 80));
+        assert_eq!(px(&frame, 10, 10), px(&original, 10, 10));
+        assert_eq!(px(&frame, 360, 150), px(&original, 360, 150));
     }
 }

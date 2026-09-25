@@ -33,8 +33,8 @@ pub fn centerface_detect(
     static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         let max_raw = hm_d.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        eprintln!("[CF-DIAG] hm={:?} sc={:?} off={:?} max_raw={:.4} max_sig={:.4} thresh={:.2}",
-            hm_t.0, sc_t.0, off_t.0, max_raw, sigmoid(max_raw), threshold);
+        eprintln!("[CF-DIAG] hm={:?} sc={:?} off={:?} max_score={:.4} thresh={:.2}",
+            hm_t.0, sc_t.0, off_t.0, max_raw, threshold);
     }
 
     let scale_x = frame_w as f32 / pad_w as f32;
@@ -44,7 +44,8 @@ pub fn centerface_detect(
     for cy in 0..feat_h {
         for cx in 0..feat_w {
             let idx = cy * feat_w + cx;
-            let score = sigmoid(hm_d[idx]);
+            // Die Heatmap enthält im Modell bereits Wahrscheinlichkeiten (wie in deface ausgewertet).
+            let score = hm_d[idx];
             if score < threshold || !is_local_max(hm_d, feat_h, feat_w, cy, cx) { continue; }
 
             let oy = off_d[idx];
@@ -59,7 +60,7 @@ pub fn centerface_detect(
             let x2 = (((x1_f + sw) * scale_x) as usize).min(frame_w);
             let y2 = (((y1_f + sh) * scale_y) as usize).min(frame_h);
             if x2 > x1 && y2 > y1 {
-                candidates.push((BBox { x: x1, y: y1, x2, y2 }, score));
+                candidates.push((BBox { x: x1, y: y1, x2, y2, score }, score));
             }
         }
     }
@@ -80,5 +81,3 @@ fn is_local_max(hm: &[f32], feat_h: usize, feat_w: usize, cy: usize, cx: usize) 
     true
 }
 
-#[inline]
-fn sigmoid(x: f32) -> f32 { 1.0 / (1.0 + (-x).exp()) }

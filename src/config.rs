@@ -11,8 +11,10 @@ pub struct Config {
     pub centerface_model: PathBuf,
     pub detection_interval: u32,
     pub plate_conf_thresh: f32,
+    /// CenterFace-Schwelle (Heatmap-Wert 0–1).
     pub face_conf_thresh: f32,
-    pub plate_grid: i32,
+    pub plate_tile_cols: usize,
+    pub plate_tile_rows: usize,
     pub frame_buffer: usize,
 }
 
@@ -57,8 +59,9 @@ impl Config {
             centerface_model,
             detection_interval: 4,
             plate_conf_thresh: 0.45,
-            face_conf_thresh: 0.55,
-            plate_grid: 20,
+            face_conf_thresh: 0.2,
+            plate_tile_cols: 3,
+            plate_tile_rows: 2,
             frame_buffer: 32,
         }
     }

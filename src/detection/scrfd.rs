@@ -46,7 +46,7 @@ pub fn scrfd_detect(
             let x1 = x1.max(0) as usize; let y1 = y1.max(0) as usize;
             let x2 = (x2 as usize).min(frame_w); let y2 = (y2 as usize).min(frame_h);
             if x2 > x1 && y2 > y1 {
-                candidates.push((BBox { x: x1, y: y1, x2, y2 }, score));
+                candidates.push((BBox { x: x1, y: y1, x2, y2, score }, score));
             }
         }
     }

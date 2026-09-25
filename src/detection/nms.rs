@@ -3,13 +3,13 @@ use super::BBox;
 pub fn greedy_nms(mut candidates: Vec<(BBox, f32)>, iou_thresh: f32, max_boxes: usize) -> Vec<BBox> {
     candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let mut kept: Vec<BBox> = Vec::new();
-    'outer: for (b, _) in &candidates {
+    'outer: for (b, score) in &candidates {
         for kb in &kept {
             if bbox_iou(b, kb) > iou_thresh {
                 continue 'outer;
             }
         }
-        kept.push(*b);
+        kept.push(BBox { score: *score, ..*b });
         if kept.len() >= max_boxes { break; }
     }
     kept

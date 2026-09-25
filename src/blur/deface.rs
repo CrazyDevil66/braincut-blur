@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     io::{Read, Write},
     path::Path,
     process::{Command, Stdio},
@@ -9,7 +8,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 
 use crate::{
-    detection::{check_nvenc, BBox, Detectors},
+    detection::{check_nvenc, Detectors},
     image_ops::{gaussian_blur_roi, pixelate_roi},
     models::load_model_config,
     state::{log as slog, SharedState},
@@ -17,7 +16,7 @@ use crate::{
 
 use super::{
     CancelFlag,
-    frame::process_detection_frame,
+    frame::{face_wird_verpixelt, process_detection_frame, Track},
     pipeline::{build_dec_args, build_enc_args, mux_and_finalize, post_status},
     preview::make_preview,
     probe::{probe, wakeup_disk},
@@ -41,10 +40,16 @@ pub fn run_deface(
         .unwrap_or(cfg.detection_interval as u64);
     let conf_thresh = model_cfg.get("plate_conf_thresh").and_then(|v| v.as_f64())
         .unwrap_or(cfg.plate_conf_thresh as f64) as f32;
-    let face_conf_thresh = model_cfg.get("face_conf_thresh").and_then(|v| v.as_f64())
-        .unwrap_or(cfg.face_conf_thresh as f64) as f32;
+    let plate_tiles = (
+        model_cfg.get("plate_tile_cols").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(cfg.plate_tile_cols).clamp(1, 4),
+        model_cfg.get("plate_tile_rows").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(cfg.plate_tile_rows).clamp(1, 4),
+    );
 
     let models = resolve_models(&model_cfg, mode, cfg, &state)?;
+    // CenterFace liefert Werte auf einer anderen Skala als SCRFD/YOLO – ohne eigene Einstellung je Modell passender Standard.
+    let face_conf_thresh = model_cfg.get("face_conf_thresh").and_then(|v| v.as_f64())
+        .map(|v| v as f32)
+        .unwrap_or(if models.use_centerface { cfg.face_conf_thresh } else { 0.5 });
 
     let (in_h, in_w) = match detection_res {
         "1080p"  => (1080, 1920),
@@ -103,6 +108,10 @@ pub fn run_deface(
     let (dec_args, cuvid) = build_dec_args(input_path, &meta.codec);
     let enc_args = build_enc_args(&tmp_output, w, h, &meta.fps_str, use_nvenc);
 
+    if mode == "plates" || mode == "both" {
+        slog(&state, &format!("Kennzeichen-Erkennung: Gesamtbild + {}×{} Kacheln", plate_tiles.0, plate_tiles.1));
+    }
+    slog(&state, &format!("Gesichts-Schwelle: {face_conf_thresh:.2}"));
     slog(&state, &format!("Hardware: NVDEC={}, NVENC={}",
         if cuvid.is_empty() { "–" } else { &cuvid },
         if use_nvenc { "h264_nvenc" } else { "– (libx264)" }));
@@ -131,10 +140,9 @@ pub fn run_deface(
     let mut cancelled = false;
     let mut total_faces: u64 = 0;
     let mut total_plates: u64 = 0;
-    let plate_grid = (cfg.plate_grid as usize).max(1);
 
-    let mut plate_buf: HashMap<(usize, usize, usize, usize), (BBox, u32)> = HashMap::new();
-    let mut face_buf:  HashMap<(usize, usize, usize, usize), (BBox, u32)> = HashMap::new();
+    let mut plate_buf: Vec<Track> = Vec::new();
+    let mut face_buf:  Vec<Track> = Vec::new();
 
     let dec_stdout = proc_dec.stdout.take().expect("decoder stdout");
     let enc_stdin  = proc_enc.stdin.take().expect("encoder stdin");
@@ -143,7 +151,7 @@ pub fn run_deface(
     let mut det_log: Option<std::io::BufWriter<std::fs::File>> = std::fs::File::create(&det_log_path)
         .ok().map(std::io::BufWriter::new);
     if let Some(ref mut log) = det_log {
-        let _ = writeln!(log, "frame,model,x,y,w,h,rel_w_pct,rel_h_pct,applied");
+        let _ = writeln!(log, "frame,model,x,y,w,h,rel_w_pct,rel_h_pct,score,applied");
     }
 
     use std::time::Duration;
@@ -168,19 +176,17 @@ pub fn run_deface(
 
             let (nf, np) = process_detection_frame(
                 &mut detectors, &buf, w, h, mode, should_detect,
-                &mut face_buf, &mut plate_buf, conf_thresh, plate_grid, frame_idx, &mut det_log,
+                &mut face_buf, &mut plate_buf, conf_thresh, plate_tiles, frame_idx, &mut det_log,
             );
             total_faces  += nf;
             total_plates += np;
 
-            let (max_face_w, max_face_h) = (w / 5, h / 5);
-            for (_, (bf, _)) in &face_buf {
-                let (rw, rh) = (bf.x2 - bf.x, bf.y2 - bf.y);
-                if rw >= 50 && rh >= 50 && rw <= max_face_w && rh <= max_face_h {
-                    gaussian_blur_roi(&mut buf, w, bf.x, bf.y, bf.x2, bf.y2);
-                }
+            for t in face_buf.iter().filter(|t| face_wird_verpixelt(&t.bbox)) {
+                let bf = t.bbox;
+                gaussian_blur_roi(&mut buf, w, bf.x, bf.y, bf.x2, bf.y2);
             }
-            for (_, (bp, _)) in &plate_buf {
+            for t in &plate_buf {
+                let bp = t.bbox;
                 pixelate_roi(&mut buf, w, bp.x, bp.y, bp.x2, bp.y2);
             }
 

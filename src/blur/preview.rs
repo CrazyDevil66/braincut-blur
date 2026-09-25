@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-
-use crate::detection::BBox;
+use super::frame::Track;
 
 pub fn draw_rect_rgb(buf: &mut [u8], pw: usize, ph: usize, x1: usize, y1: usize, x2: usize, y2: usize, color: [u8; 3], thickness: usize) {
     for t in 0..thickness {
@@ -22,8 +20,8 @@ pub fn draw_rect_rgb(buf: &mut [u8], pw: usize, ph: usize, x1: usize, y1: usize,
 pub fn make_preview(
     frame: &[u8],
     fw: usize, fh: usize,
-    face_buf: &HashMap<(usize, usize, usize, usize), (BBox, u32)>,
-    plate_buf: &HashMap<(usize, usize, usize, usize), (BBox, u32)>,
+    face_buf: &[Track],
+    plate_buf: &[Track],
 ) -> Vec<u8> {
     let max_w = 960usize;
     let (pw, ph) = if fw > max_w { (max_w, (fh * max_w / fw).max(1)) } else { (fw.max(1), fh.max(1)) };
@@ -40,13 +38,13 @@ pub fn make_preview(
             rgb[d] = frame[s + 2]; rgb[d+1] = frame[s + 1]; rgb[d+2] = frame[s]; // BGR→RGB
         }
     }
-    for (_, (bf, _)) in face_buf {
+    for bf in face_buf.iter().map(|t| t.bbox) {
         draw_rect_rgb(&mut rgb, pw, ph,
             (bf.x as f64 * sx) as usize, (bf.y as f64 * sy) as usize,
             (bf.x2 as f64 * sx) as usize, (bf.y2 as f64 * sy) as usize,
             [255, 60, 60], 2);
     }
-    for (_, (bp, _)) in plate_buf {
+    for bp in plate_buf.iter().map(|t| t.bbox) {
         draw_rect_rgb(&mut rgb, pw, ph,
             (bp.x as f64 * sx) as usize, (bp.y as f64 * sy) as usize,
             (bp.x2 as f64 * sx) as usize, (bp.y2 as f64 * sy) as usize,

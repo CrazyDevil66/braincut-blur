@@ -5,23 +5,25 @@ mod scrfd;
 mod session;
 mod yolo;
 
-pub use preprocess::resize_bgr;
+pub use nms::bbox_iou;
 pub use session::{build_session, check_nvdec, check_nvenc};
 
 use centerface::centerface_detect;
 use scrfd::scrfd_detect;
-use yolo::yolo_detect;
+use yolo::{yolo_detect, yolo_detect_tiled};
 
 use anyhow::Result;
 use ort::session::Session;
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BBox {
     pub x: usize,
     pub y: usize,
     pub x2: usize,
     pub y2: usize,
+    /// Konfidenz des Modells (0 bei Boxen ohne Bewertung).
+    pub score: f32,
 }
 
 pub struct Detectors {
@@ -89,9 +91,11 @@ impl Detectors {
         }
     }
 
-    pub fn detect_plates(&mut self, frame: &[u8], fw: usize, fh: usize, conf: f32) -> Vec<BBox> {
+    /// Erkennt Kennzeichen im Gesamtbild und zusätzlich in `tile_cols` × `tile_rows` Kacheln,
+    /// damit kleine Kennzeichen nicht beim Verkleinern auf 640 px verloren gehen.
+    pub fn detect_plates(&mut self, frame: &[u8], fw: usize, fh: usize, conf: f32, tile_cols: usize, tile_rows: usize) -> Vec<BBox> {
         if self.plate_yolo.is_some() {
-            yolo_detect(self.plate_yolo.as_mut().unwrap(), frame, fw, fh, conf, true, &mut self.yolo_resize_buf)
+            yolo_detect_tiled(self.plate_yolo.as_mut().unwrap(), frame, fw, fh, conf, true, tile_cols, tile_rows, &mut self.yolo_resize_buf)
                 .unwrap_or_default()
                 .into_iter().map(|b| expand_bbox(b, fw, fh, 0.15)).collect()
         } else {
@@ -108,5 +112,6 @@ fn expand_bbox(b: BBox, fw: usize, fh: usize, factor: f32) -> BBox {
         y: b.y.saturating_sub(ey),
         x2: (b.x2 + ex).min(fw.saturating_sub(1)),
         y2: (b.y2 + ey).min(fh.saturating_sub(1)),
+        score: b.score,
     }
 }

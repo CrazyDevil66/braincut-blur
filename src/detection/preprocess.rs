@@ -35,20 +35,84 @@ pub fn preprocess_scrfd(frame: &[u8], fw: usize, fh: usize, buf: &mut [u8]) -> V
     input
 }
 
-pub fn preprocess_yolo(frame: &[u8], fw: usize, fh: usize, buf: &mut [u8]) -> Vec<f32> {
-    let (in_h, in_w) = (640usize, 640usize);
-    resize_bgr_into(frame, fw, fh, in_w, in_h, buf);
-    // BGR→RGB, / 255
-    let mut input = vec![0f32; 3 * in_h * in_w];
-    for y in 0..in_h {
-        for x in 0..in_w {
-            let s = (y * in_w + x) * 3;
-            input[y * in_w + x]                   = buf[s + 2] as f32 / 255.0;
-            input[in_h * in_w + y * in_w + x]     = buf[s + 1] as f32 / 255.0;
-            input[2 * in_h * in_w + y * in_w + x] = buf[s]     as f32 / 255.0;
+/// Rechteckiger Bildausschnitt in Frame-Koordinaten.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Region {
+    pub x0: usize,
+    pub y0: usize,
+    pub w: usize,
+    pub h: usize,
+}
+
+/// Lage des Ausschnitts im quadratischen Modell-Eingang nach dem Letterbox-Skalieren.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Letterbox {
+    pub scale: f32,
+    pub pad_x: f32,
+    pub pad_y: f32,
+}
+
+impl Letterbox {
+    /// Rechnet einen Punkt aus dem Modell-Eingang zurück in Frame-Koordinaten.
+    pub fn to_frame(&self, region: &Region, mx: f32, my: f32) -> (f32, f32) {
+        (
+            (mx - self.pad_x) / self.scale + region.x0 as f32,
+            (my - self.pad_y) / self.scale + region.y0 as f32,
+        )
+    }
+}
+
+/// Teilt das Bild in `cols` × `rows` Kacheln mit `overlap` (Anteil) Überlappung,
+/// damit Objekte an den Kachelgrenzen vollständig in mindestens einer Kachel liegen.
+pub fn tile_regions(fw: usize, fh: usize, cols: usize, rows: usize, overlap: f32) -> Vec<Region> {
+    let (cols, rows) = (cols.max(1), rows.max(1));
+    let axis = |len: usize, n: usize| -> Vec<(usize, usize)> {
+        let base = len / n;
+        let size = ((base as f32 * (1.0 + overlap)) as usize).min(len).max(1);
+        (0..n)
+            .map(|i| {
+                let center = i * base + base / 2;
+                let start = center.saturating_sub(size / 2).min(len - size);
+                (start, size)
+            })
+            .collect()
+    };
+    let xs = axis(fw, cols);
+    let ys = axis(fh, rows);
+    ys.iter()
+        .flat_map(|&(y0, h)| xs.iter().map(move |&(x0, w)| Region { x0, y0, w, h }))
+        .collect()
+}
+
+/// Skaliert `region` seitenverhältnistreu in ein `size` × `size`-Quadrat (Rand grau wie beim YOLO-Training)
+/// und liefert den Eingang als RGB-CHW-Tensor mit Werten 0–1.
+pub fn letterbox_yolo(frame: &[u8], fw: usize, region: &Region, size: usize, buf: &mut [u8]) -> (Vec<f32>, Letterbox) {
+    let scale = (size as f32 / region.w as f32).min(size as f32 / region.h as f32);
+    let nw = ((region.w as f32 * scale).round() as usize).clamp(1, size);
+    let nh = ((region.h as f32 * scale).round() as usize).clamp(1, size);
+    let pad_x = (size - nw) / 2;
+    let pad_y = (size - nh) / 2;
+
+    buf[..size * size * 3].fill(114);
+    for dy in 0..nh {
+        let sy = region.y0 + (dy * region.h / nh).min(region.h - 1);
+        for dx in 0..nw {
+            let sx = region.x0 + (dx * region.w / nw).min(region.w - 1);
+            let s = (sy * fw + sx) * 3;
+            let d = ((dy + pad_y) * size + dx + pad_x) * 3;
+            buf[d..d + 3].copy_from_slice(&frame[s..s + 3]);
         }
     }
-    input
+
+    let n = size * size;
+    let mut input = vec![0f32; 3 * n];
+    for i in 0..n {
+        let s = i * 3;
+        input[i]         = buf[s + 2] as f32 / 255.0;
+        input[n + i]     = buf[s + 1] as f32 / 255.0;
+        input[2 * n + i] = buf[s]     as f32 / 255.0;
+    }
+    (input, Letterbox { scale, pad_x: pad_x as f32, pad_y: pad_y as f32 })
 }
 
 fn resize_bgr_into(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, dst: &mut [u8]) {
@@ -67,4 +131,46 @@ pub fn resize_bgr(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec
     let mut dst = vec![0u8; dw * dh * 3];
     resize_bgr_into(src, sw, sh, dw, dh, &mut dst);
     dst
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kacheln_decken_das_bild_mit_ueberlappung_ab() {
+        let t = tile_regions(3840, 2160, 3, 2, 0.15);
+        assert_eq!(t.len(), 6);
+        assert!(t.iter().all(|r| r.x0 + r.w <= 3840 && r.y0 + r.h <= 2160));
+        assert_eq!(t[0].x0, 0);
+        assert_eq!(t[2].x0 + t[2].w, 3840);
+        assert_eq!(t[5].y0 + t[5].h, 2160);
+        // Nachbarkacheln überlappen sich
+        assert!(t[0].x0 + t[0].w > t[1].x0);
+        assert!(t[0].y0 + t[0].h > t[3].y0);
+    }
+
+    #[test]
+    fn eine_kachel_ist_das_ganze_bild() {
+        assert_eq!(tile_regions(3840, 2160, 1, 1, 0.15), vec![Region { x0: 0, y0: 0, w: 3840, h: 2160 }]);
+    }
+
+    #[test]
+    fn letterbox_rechnet_punkte_zurueck() {
+        let (fw, fh) = (3840usize, 2160usize);
+        let frame = vec![0u8; fw * fh * 3];
+        let mut buf = vec![0u8; 640 * 640 * 3];
+        // Gesamtbild: 16:9 → oben/unten Rand
+        let full = Region { x0: 0, y0: 0, w: fw, h: fh };
+        let (_, lb) = letterbox_yolo(&frame, fw, &full, 640, &mut buf);
+        assert_eq!(lb.pad_x, 0.0);
+        assert_eq!(lb.pad_y, 140.0);
+        let (x, y) = lb.to_frame(&full, 320.0, 320.0);
+        assert!((x - 1920.0).abs() < 1.0 && (y - 1080.0).abs() < 1.0);
+        // Kachel rechts unten
+        let tile = Region { x0: 2400, y0: 1000, w: 1440, h: 1160 };
+        let (_, lb) = letterbox_yolo(&frame, fw, &tile, 640, &mut buf);
+        let (x, y) = lb.to_frame(&tile, lb.pad_x, lb.pad_y);
+        assert!((x - 2400.0).abs() < 1.0 && (y - 1000.0).abs() < 1.0);
+    }
 }
