@@ -27,7 +27,7 @@ impl Config {
         let completion_webhook = if n8n_ip.is_empty() {
             String::new()
         } else {
-            format!("http://{}:{}/webhook/blur-complete", n8n_ip, n8n_port)
+            format!("http://{}:{}/webhook/blur-done", n8n_ip, n8n_port)
         };
 
         let media_host_path = std::env::var("MEDIA_HOST_PATH")
