@@ -1,0 +1,29 @@
+[package]
+name = "blur-service"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "blur-service"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# No download-binaries: ORT_LIB_LOCATION points to pip-installed onnxruntime-gpu
+ort = { version = "2.0.0-rc.12", features = ["cuda", "tensorrt", "download-binaries", "copy-dylibs"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = "0.4"
+ureq = { version = "2", features = ["json"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+image = { version = "0.24", default-features = false, features = ["jpeg"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

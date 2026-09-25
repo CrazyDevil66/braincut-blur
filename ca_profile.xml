@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommunityApplications>
+  <Profile>Blur service for the BrainCut n8n workflow. Automatically blurs faces and license plates in videos via REST API. Part of the BrainCut automation pipeline with Telegram control.</Profile>
+  <Icon>https://raw.githubusercontent.com/CrazyDevil66/braincut-blur/main/icon.svg</Icon>
+  <WebPage>https://github.com/CrazyDevil66/braincut-blur</WebPage>
+</CommunityApplications>

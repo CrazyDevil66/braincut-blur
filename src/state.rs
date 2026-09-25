@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AppStatus {
+    #[serde(skip)]
+    pub preview_jpeg: Vec<u8>,
     pub state: String,
     pub current: u32,
     pub total: u32,
@@ -46,6 +48,7 @@ impl Default for AppStatus {
             started_at: String::new(),
             started_at_ts: 0.0,
             log: VecDeque::with_capacity(200),
+            preview_jpeg: Vec::new(),
         }
     }
 }

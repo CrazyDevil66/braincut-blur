@@ -129,6 +129,11 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.25)}
 .m-btn-delete:hover:not(:disabled){background:rgba(255,69,58,.22)}
 .dl-bar{height:3px;background:rgba(255,255,255,.1);border-radius:2px;margin-top:6px;overflow:hidden}
 .dl-bar-fill{height:100%;background:#0a84ff;border-radius:2px;transition:width .3s}
+.preview-card{padding:0;overflow:hidden;position:relative;max-width:380px}
+.preview-img{width:100%;display:block;border-radius:16px}
+.preview-badge{position:absolute;top:10px;left:12px;background:rgba(0,0,0,.6);backdrop-filter:blur(6px);padding:3px 9px;border-radius:6px;font-size:.65rem;font-weight:600;color:rgba(255,255,255,.75);pointer-events:none}
+.preview-legend{display:flex;gap:10px;padding:8px 12px 10px;font-size:.66rem;color:rgba(255,255,255,.4)}
+.legend-dot{width:8px;height:8px;border-radius:2px;flex-shrink:0;margin-top:2px}
 .steps-card{padding:14px 18px 10px}
 .steps-inner{display:flex;align-items:flex-start}
 .step{flex:1;display:flex;flex-direction:column;align-items:center;min-width:0}
@@ -286,6 +291,15 @@ input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.25)}
       </div>
     </div>
 
+    <div class="card preview-card" id="previewCard" style="display:none">
+      <img class="preview-img" id="previewImg" alt="">
+      <div class="preview-badge" id="previewBadge">Live</div>
+      <div class="preview-legend">
+        <span class="legend-dot" style="background:#ff3c3c"></span><span>Gesicht</span>
+        <span class="legend-dot" style="background:#ffc800"></span><span>Kennzeichen</span>
+      </div>
+    </div>
+
     <div class="card" id="renderCard" style="display:none">
       <div class="card-title">Encodiert</div>
       <div class="render-row">
@@ -316,6 +330,26 @@ var lastF=0,lastFT=Date.now(),smoothFps=0,autoScroll=true;
 var settingsData=null,activeTab='face',hfToken=localStorage.getItem('hf_token')||''
 var fpsHistory=[],configData={detection_interval:4,plate_conf_thresh:0.45,face_conf_thresh:0.55};
 var sbVisible=false,sbHideTimer=null;
+var previewTimer=null,previewActive=false;
+
+function startPreview(){
+  if(previewActive)return;
+  previewActive=true;
+  document.getElementById('previewCard').style.display='block';
+  function poll(){
+    var img=document.getElementById('previewImg');
+    if(img)img.src='/api/frame?t='+Date.now();
+    previewTimer=setTimeout(poll,1500);
+  }
+  poll();
+}
+function stopPreview(){
+  previewActive=false;
+  if(previewTimer){clearTimeout(previewTimer);previewTimer=null;}
+  document.getElementById('previewCard').style.display='none';
+  var img=document.getElementById('previewImg');
+  if(img)img.src='';
+}
 var SB_KEYS=['probe','load_models','blur_loop','encode','mux'];
 
 function renderStepsBar(activeIdx,isErr){
@@ -432,20 +466,30 @@ function renderModelList(type,d){
   var models=d.catalog.filter(function(m){return m.type===type;});
   var activeId=type==='face'?d.config.face_model:d.config.plate_model;
   var iconCls=type==='face'?'fi':'pi',iconChar=type==='face'?'&#128065;':'&#128663;';
-  if(!models.length){document.getElementById(listId).innerHTML='<div style="color:rgba(255,255,255,.3);font-size:.8rem;padding:8px 0">Keine Modelle.</div>';return;}
   var html='';
+  // Kennzeichen: "Kein Blur"-Option am Anfang
+  if(type==='plate'){
+    var noneActive=!activeId||activeId==='null'||activeId===null;
+    html+='<div class="model-row'+(noneActive?' active':'')+'"><div class="model-icon pi" style="font-size:.9rem;color:rgba(255,255,255,.25)">&#8722;</div>';
+    html+='<div class="model-info"><div class="model-name">Kein Kennzeichen-Blur'+(noneActive?'<span class="active-badge">Aktiv</span>':'')+'</div>';
+    html+='<div class="model-desc">Kennzeichen werden nicht verblurrt</div></div>';
+    html+='<div class="model-actions">';
+    if(!noneActive)html+='<button class="m-btn m-btn-delete" style="background:rgba(255,159,10,.1);color:#ff9f0a" data-action="activate-none" data-type="plate">Deaktivieren</button>';
+    html+='</div></div>';
+  }
+  if(!models.length){document.getElementById(listId).innerHTML=html+'<div style="color:rgba(255,255,255,.3);font-size:.8rem;padding:8px 0">Keine Modelle im Katalog.</div>';return;}
   models.forEach(function(m){
     var isActive=m.id===activeId,isInstalled=!!(d.installed[m.id]),prog=d.install_progress[m.id],isDl=prog&&prog.status==='downloading';
     html+='<div class="model-row'+(isActive?' active':'')+'"><div class="model-icon '+iconCls+'">'+ iconChar +'</div>';
     html+='<div class="model-info"><div class="model-name">'+esc(m.name);
     if(isActive)html+='<span class="active-badge">Aktiv</span>';
     html+='</div><div class="model-desc">'+esc(m.description)+'</div>';
-    html+='<div class="model-meta">'+(m.builtin?'Integriert':m.size_mb+' MB')+' · '+esc(m.format)+'</div>';
+    html+='<div class="model-meta">'+(m.builtin?'Integriert':m.size_mb+' MB')+(m.format?' · '+esc(m.format):'')+'</div>';
     if(isDl){html+='<div class="dl-bar"><div class="dl-bar-fill" style="width:'+prog.pct+'%"></div></div><div style="font-size:.66rem;color:rgba(255,255,255,.3);margin-top:3px">'+ prog.pct+'% heruntergeladen…</div>';}
     if(prog&&prog.status==='error')html+='<div style="font-size:.68rem;color:#ff453a;margin-top:4px">⚠ '+esc(prog.error)+'</div>';
     html+='</div><div class="model-actions">';
     if(isDl)html+='<button class="m-btn m-btn-install" disabled>Lädt…</button>';
-    else if(!m.builtin&&!isInstalled&&m.url)html+='<button class="m-btn m-btn-install" data-action="install" data-id="'+esc(m.id)+'" data-url="'+esc(m.url)+'">Installieren</button>';
+    else if(!m.builtin&&!isInstalled)html+='<button class="m-btn m-btn-install" data-action="install" data-id="'+esc(m.id)+'" data-url="'+esc(m.url||'')+'">Installieren…</button>';
     if((isInstalled||m.builtin)&&!isActive)html+='<button class="m-btn m-btn-activate" data-action="activate" data-id="'+esc(m.id)+'" data-type="'+type+'">Aktivieren</button>';
     if(isInstalled&&!m.builtin)html+='<button class="m-btn m-btn-delete" data-action="delete" data-id="'+esc(m.id)+'">Löschen</button>';
     html+='</div></div>';
@@ -457,9 +501,11 @@ async function settingsRefreshCatalog(){
   try{await fetch('/api/models/refresh',{method:'POST'});await loadSettings();}catch(e){}
   btn.disabled=false;btn.textContent='↻ Aktualisieren';
 }
-async function installModel(id,url){
+async function installModel(id,suggestedUrl){
+  var url=window.prompt('Download-URL für '+id+':\n(HuggingFace-Token oben eintragen falls nötig)',suggestedUrl||'');
+  if(!url||!url.trim())return;
   try{
-    await fetch('/api/models/install',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,url:url,hf_token:hfToken})});
+    await fetch('/api/models/install',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,url:url.trim(),hf_token:hfToken})});
     var iv=setInterval(async function(){
       await loadSettings();
       if(settingsData&&settingsData.install_progress[id]){var s=settingsData.install_progress[id].status;if(s==='done'||s==='error')clearInterval(iv);}
@@ -495,6 +541,7 @@ function handleModelClick(e){
   var action=btn.dataset.action,id=btn.dataset.id;
   if(action==='install')installModel(id,btn.dataset.url);
   else if(action==='activate')activateModel(id,btn.dataset.type);
+  else if(action==='activate-none')activateModel(null,btn.dataset.type);
   else if(action==='delete')deleteModel(id);
 }
 async function refresh(){
@@ -509,16 +556,19 @@ async function refresh(){
       sdot.className='status-dot'+(d.error?' error':'');pillText.textContent=d.error?'Fehler':'Bereit';
       cancelBtn.style.display='none';
       document.getElementById('jobCard').style.display='none';document.getElementById('renderCard').style.display='none';
+      stopPreview();
       lastF=0;lastFT=Date.now();smoothFps=0;fpsHistory=[];
     }else if(d.state==='blur'){
       sdot.className='status-dot active pulse';pillText.textContent='Verarbeitet';
       cancelBtn.style.display='';cancelBtn.disabled=false;cancelBtn.textContent='Abbrechen';
       document.getElementById('jobCard').style.display='block';document.getElementById('renderCard').style.display='none';
+      startPreview();
       document.getElementById('jobName').textContent=d.name||'–';
       document.getElementById('jobSub').textContent='Video '+d.current+' von '+d.total;
       var pct=d.frame_pct||0;
       document.getElementById('pBar').style.width=pct+'%';
       document.getElementById('pLeft').textContent=pct+'% · '+(d.frame_current||0).toLocaleString('de-DE')+' / '+(d.frame_total||0).toLocaleString('de-DE')+' Frames';
+      document.getElementById('pRight').textContent=d.eta_seconds>0?'~'+fmt(d.eta_seconds)+' verbleibend':'';
       var fpsStr=calcFps(d.frame_current||0);
       document.getElementById('sFps').textContent=fpsStr;
       document.getElementById('sElapsed').textContent=fmt(d.elapsed_seconds);

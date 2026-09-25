@@ -1,0 +1,173 @@
+
+<div class="scrim" id="scrim"></div>
+
+<div class="drawer" id="drawer">
+  <div class="drawer-header">
+    <span class="drawer-title">Modelle verwalten</span>
+    <button class="drawer-close" id="drawerClose">&#x2715;</button>
+  </div>
+  <div class="drawer-body">
+    <div class="catalog-bar">
+      <span class="catalog-info" id="catalogInfo">Lade Katalog&hellip;</span>
+      <button class="refresh-btn" id="refreshCatalogBtn">&#x21bb; Aktualisieren</button>
+    </div>
+    <div class="seg-ctrl">
+      <button class="seg-btn active" id="tabFace">Gesicht</button>
+      <button class="seg-btn" id="tabPlate">Kennzeichen</button>
+    </div>
+    <div class="model-list" id="faceModelList"><div style="color:rgba(255,255,255,.3);font-size:.8rem;padding:8px 0">Lade&hellip;</div></div>
+    <div class="model-list" id="plateModelList" style="display:none"><div style="color:rgba(255,255,255,.3);font-size:.8rem;padding:8px 0">Lade&hellip;</div></div>
+  </div>
+</div>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="sb-logo">
+      <div class="logo-box">&#9986;</div>
+      <div><div class="logo-title">BrainCut Blur</div><div class="logo-sub">Face &amp; Plate Detection</div></div>
+    </div>
+
+    <div class="sb-section">
+      <div class="sb-label">Hardware</div>
+      <div class="hw-chips">
+        <div class="hw-chip" id="chipNvdec"><span class="hw-dot"></span>NVDEC</div>
+        <div class="hw-chip" id="chipNvenc"><span class="hw-dot"></span>NVENC</div>
+        <div class="hw-chip" id="chipTrt"><span class="hw-dot"></span>TRT</div>
+      </div>
+    </div>
+
+    <div class="sb-section" style="margin-top:16px">
+      <div class="sb-label">Modelle</div>
+      <div class="model-active-row" id="sbFaceModel">
+        <span class="model-active-icon">&#128065;</span>
+        <span class="model-active-name">&#8211;</span>
+      </div>
+      <div class="model-active-row" id="sbPlateModel">
+        <span class="model-active-icon">&#128663;</span>
+        <span class="model-active-name">&#8211;</span>
+      </div>
+      <button class="manage-btn" id="gearBtn">&#9881; Modelle verwalten</button>
+    </div>
+
+    <div class="sb-section" style="margin-top:16px">
+      <div class="sb-label">Erkennung</div>
+      <div class="slider-row">
+        <div class="slider-top"><span class="slider-label">Frame-Skip</span><span class="slider-val" id="frameSkipVal">4</span></div>
+        <input type="range" min="1" max="8" step="1" value="4" id="frameSkipSlider">
+      </div>
+      <div class="slider-row">
+        <div class="slider-top"><span class="slider-label">Gesichts-Konfidenz</span><span class="slider-val" id="faceConfVal">0.55</span></div>
+        <input type="range" min="0.30" max="0.90" step="0.05" value="0.55" id="faceConfSlider">
+      </div>
+      <div class="slider-row">
+        <div class="slider-top"><span class="slider-label">Kennzeichen-Konfidenz</span><span class="slider-val" id="confVal">0.45</span></div>
+        <input type="range" min="0.30" max="0.80" step="0.05" value="0.45" id="confSlider">
+      </div>
+    </div>
+
+    <div class="sb-section" style="margin-top:16px">
+      <div class="sb-label">HuggingFace Token</div>
+      <div class="hf-row">
+        <input type="password" class="hf-input" id="hfTokenInput" placeholder="hf_xxxx&hellip;">
+        <button class="hf-save" id="hfTokenSaveBtn">Speichern</button>
+      </div>
+      <div id="hfTokenStatus" style="font-size:.66rem;color:rgba(255,255,255,.3);margin-top:5px"></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="main-top">
+      <div class="status-pill" id="pill">
+        <div class="status-dot" id="sdot"></div>
+        <span id="pillText">Laden&hellip;</span>
+      </div>
+      <button class="cancel-btn" id="cancelBtn" style="display:none">Abbrechen</button>
+    </div>
+
+    <div class="err-banner" id="errBanner" style="display:none">
+      &#9888;&nbsp;<span id="errText"></span>
+    </div>
+
+    <div class="card steps-card" id="stepsBar" style="display:none">
+  <div class="steps-inner" id="stepsInner">
+    <div class="step">
+      <div class="step-node"><div class="step-line invis"></div><div class="step-circle" id="sc0"></div><div class="step-line" id="sl0"></div></div>
+      <div class="step-lbl" id="slbl0">Video&#10;analysieren</div>
+    </div>
+    <div class="step">
+      <div class="step-node"><div class="step-line" id="sl0r"></div><div class="step-circle" id="sc1"></div><div class="step-line" id="sl1"></div></div>
+      <div class="step-lbl" id="slbl1">Modelle&#10;laden</div>
+    </div>
+    <div class="step">
+      <div class="step-node"><div class="step-line" id="sl1r"></div><div class="step-circle" id="sc2"></div><div class="step-line" id="sl2"></div></div>
+      <div class="step-lbl" id="slbl2">Blur-Loop</div>
+    </div>
+    <div class="step">
+      <div class="step-node"><div class="step-line" id="sl2r"></div><div class="step-circle" id="sc3"></div><div class="step-line" id="sl3"></div></div>
+      <div class="step-lbl" id="slbl3">Encodieren</div>
+    </div>
+    <div class="step">
+      <div class="step-node"><div class="step-line" id="sl3r"></div><div class="step-circle" id="sc4"></div><div class="step-line" id="sl4"></div></div>
+      <div class="step-lbl" id="slbl4">Audio-Mux</div>
+    </div>
+    <div class="step">
+      <div class="step-node"><div class="step-line" id="sl4r"></div><div class="step-circle" id="sc5"></div><div class="step-line invis"></div></div>
+      <div class="step-lbl" id="slbl5">Fertig</div>
+    </div>
+  </div>
+</div>
+
+    <div class="card" id="jobCard" style="display:none">
+      <div class="job-name" id="jobName"></div>
+      <div class="job-sub"  id="jobSub"></div>
+      <div class="progress-track"><div class="progress-fill" id="pBar" style="width:0%"></div></div>
+      <div class="progress-meta"><span id="pLeft"></span><span id="pRight"></span></div>
+      <div class="metrics">
+        <div class="metric"><div class="metric-lbl">Geschwindigkeit</div><div class="metric-val blue" id="sFps">&#8211;</div></div>
+        <div class="metric"><div class="metric-lbl">Verstrichen</div><div class="metric-val" id="sElapsed">&#8211;</div></div>
+        <div class="metric"><div class="metric-lbl">Verbleibend</div><div class="metric-val green" id="sEta">&#8211;</div></div>
+      </div>
+      <div class="spark-wrap">
+        <svg id="sparkline" preserveAspectRatio="none"></svg>
+        <div class="spark-meta"><span id="sparkMin"></span><span id="sparkPeak"></span></div>
+      </div>
+      <div class="det-row">
+        <div class="det-card"><span class="det-icon">&#128065;</span><div><div class="det-num" id="faceCount">0</div><div class="det-lbl">Gesichter</div></div></div>
+        <div class="det-card"><span class="det-icon">&#128663;</span><div><div class="det-num" id="plateCount">0</div><div class="det-lbl">Kennzeichen</div></div></div>
+      </div>
+    </div>
+
+    <div class="card preview-card" id="previewCard" style="display:none">
+      <img class="preview-img" id="previewImg" alt="">
+      <div class="preview-badge" id="previewBadge">Live</div>
+      <div class="preview-legend">
+        <span class="legend-dot" style="background:#ff3c3c"></span><span>Gesicht</span>
+        <span class="legend-dot" style="background:#ffc800"></span><span>Kennzeichen</span>
+      </div>
+    </div>
+
+    <div class="card" id="renderCard" style="display:none">
+      <div class="card-title">Encodiert</div>
+      <div class="render-row">
+        <div class="spinner"></div>
+        <div>
+          <div style="font-size:.9rem;font-weight:600" id="renderName"></div>
+          <div style="font-size:.71rem;color:rgba(255,255,255,.35);margin-top:2px">NVENC H.264 &ndash; Encoding l&auml;uft&hellip;</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <span class="card-title" style="margin-bottom:0">Protokoll</span>
+        <span id="logCount" style="font-size:.66rem;color:rgba(255,255,255,.2)">0 Eintr&auml;ge</span>
+      </div>
+      <div class="log-box" id="logBox"></div>
+      <div class="log-foot">
+        <span id="refreshTs"></span>
+        <span class="as-btn on" id="asBtn">&#8595; Auto-Scroll</span>
+      </div>
+    </div>
+  </main>
+</div>
+
