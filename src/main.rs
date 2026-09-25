@@ -5,6 +5,7 @@ mod handlers;
 mod image_ops;
 mod models;
 mod paths;
+mod render;
 mod state;
 
 use std::sync::Arc;

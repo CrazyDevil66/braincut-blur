@@ -98,7 +98,7 @@ Danach in Unraid den Container neu starten – er zieht `latest` beim Start.
 | POST | `/blur` | Blur-Aufträge starten (`jobs`, `statusUrl`, `fullJob`) |
 | POST | `/cancel` | Laufenden Auftrag abbrechen |
 | POST | `/job-control` | `{ "action": "status" \| "cancel" }` |
-| POST | `/render` | siehe „Bekannte Einschränkungen“ |
+| POST | `/render` | Clips zusammenschneiden (Geschwindigkeit, Ton, Musik) – antwortet erst nach Fertigstellung |
 | GET | `/api/models` | Katalog, installierte Modelle, Konfiguration |
 | POST | `/api/models/install` | Modell von URL installieren |
 | POST | `/api/models/activate` | Gesichts- oder Kennzeichen-Modell aktivieren |
@@ -122,14 +122,30 @@ Beispiel `/blur`:
 ```
 
 Zu jeder Ausgabedatei wird `<ausgabe>.detections.csv` mit allen Erkennungen geschrieben.
+Nach Abschluss meldet der Service sich bei `http://<N8N_SERVER_IP>:<N8N_SERVER_PORT>/webhook/blur-done`.
+
+Beispiel `/render` (so sendet es der Processing-Workflow):
+
+```json
+{
+  "clips": [{ "path": "/mnt/.../02_processing/blurred_1_video.mp4", "speed_factor": 4, "mute_audio": false, "volume_factor": 1.0 }],
+  "audio": { "mode": "mix_music", "musicFile": { "path": "/mnt/.../05_audio/musik.mp3" }, "musicVolume": 0.35, "loop": true },
+  "output_path": "/mnt/.../03_output/fertig.mp4",
+  "overwrite": false,
+  "move_sources_to": "/mnt/.../04_done",
+  "cleanup_paths": []
+}
+```
+
+Audio-Modi: `original`, `mute` (über `mute_audio` je Clip), `replace_with_music`, `mix_music`.
+Antwort: `{ "success": true, "out_path", "out_name", "size", "size_bytes" }` bzw. `{ "success": false, "error" }`.
+Ausgabe: H.264 (CRF 22), 1920 px breit, 30 fps, AAC 192 kbit/s.
 
 ---
 
 ## Bekannte Einschränkungen
 
 - Nur ein Auftrag gleichzeitig (weitere Anfragen → `409 Conflict`).
-- `/render` (Zusammenschnitt, Geschwindigkeit, Musik) ist aus der Python-Version noch nicht portiert.
-- Der Abschluss-Webhook geht an `/webhook/blur-complete`; der N8N-Workflow erwartet `/webhook/blur-done`.
 - Der Service hat keine Authentifizierung – nur im vertrauenswürdigen LAN betreiben.
 
 ---

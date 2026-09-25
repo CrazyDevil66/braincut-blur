@@ -7,6 +7,7 @@ use axum::{
 use serde_json::json;
 
 use super::{now_unix, App};
+use crate::state::AppStatus;
 
 static UI_HTML: &str = include_str!("../../ui/index.html");
 
@@ -18,12 +19,12 @@ pub async fn health_handler() -> Json<serde_json::Value> {
     Json(json!({ "status": "ok" }))
 }
 
-pub async fn status_handler(State(app): State<App>) -> Json<serde_json::Value> {
-    let s = app.status.lock().unwrap();
+/// Status-JSON für `/status` und `/job-control` (Aktion `status`).
+pub fn status_json(s: &AppStatus) -> serde_json::Value {
     let ts = s.started_at_ts;
     let elapsed = if ts > 0.0 && s.state != "idle" { (now_unix() - ts) as u64 } else { 0 };
     let log_vec: Vec<&str> = s.log.iter().map(|l| l.as_str()).collect();
-    Json(json!({
+    json!({
         "state": s.state, "current": s.current, "total": s.total,
         "name": s.name, "error": s.error,
         "frame_current": s.frame_current, "frame_total": s.frame_total,
@@ -33,7 +34,11 @@ pub async fn status_handler(State(app): State<App>) -> Json<serde_json::Value> {
         "sub_state": s.sub_state, "out_name": s.out_name,
         "started_at": s.started_at, "started_at_ts": s.started_at_ts,
         "elapsed_seconds": elapsed, "logs": log_vec,
-    }))
+    })
+}
+
+pub async fn status_handler(State(app): State<App>) -> Json<serde_json::Value> {
+    Json(status_json(&app.status.lock().unwrap()))
 }
 
 pub async fn api_frame_handler(State(app): State<App>) -> impl IntoResponse {
