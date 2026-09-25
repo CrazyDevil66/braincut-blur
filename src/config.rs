@@ -15,6 +15,8 @@ pub struct Config {
     pub face_conf_thresh: f32,
     pub plate_tile_cols: usize,
     pub plate_tile_rows: usize,
+    pub face_tile_cols: usize,
+    pub face_tile_rows: usize,
     pub frame_buffer: usize,
 }
 
@@ -62,6 +64,8 @@ impl Config {
             face_conf_thresh: 0.2,
             plate_tile_cols: 3,
             plate_tile_rows: 2,
+            face_tile_cols: 4,
+            face_tile_rows: 3,
             frame_buffer: 32,
         }
     }

@@ -45,6 +45,11 @@ pub fn run_deface(
         model_cfg.get("plate_tile_rows").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(cfg.plate_tile_rows).clamp(1, 4),
     );
 
+    let face_tiles = (
+        model_cfg.get("face_tile_cols").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(cfg.face_tile_cols).clamp(1, 4),
+        model_cfg.get("face_tile_rows").and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(cfg.face_tile_rows).clamp(1, 4),
+    );
+
     let models = resolve_models(&model_cfg, mode, cfg, &state)?;
     // CenterFace liefert Werte auf einer anderen Skala als SCRFD/YOLO – ohne eigene Einstellung je Modell passender Standard.
     let face_conf_thresh = model_cfg.get("face_conf_thresh").and_then(|v| v.as_f64())
@@ -99,6 +104,10 @@ pub fn run_deface(
         models.plate_model_path.as_deref(),
         in_h, in_w, use_trt, face_conf_thresh,
     ).context("Detektoren laden")?;
+    detectors.face_tiles = face_tiles;
+    if models.face_scrfd_path.is_some() && (mode == "faces" || mode == "both") {
+        slog(&state, &format!("Gesichtserkennung SCRFD: Gesamtbild + {}×{} Kacheln", face_tiles.0, face_tiles.1));
+    }
 
     wakeup_disk(input_path);
     let use_nvenc = check_nvenc();

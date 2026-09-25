@@ -19,22 +19,6 @@ pub fn preprocess_centerface(
     (input, pad_h, pad_w)
 }
 
-pub fn preprocess_scrfd(frame: &[u8], fw: usize, fh: usize, buf: &mut [u8]) -> Vec<f32> {
-    let (in_h, in_w) = (640usize, 640usize);
-    resize_bgr_into(frame, fw, fh, in_w, in_h, buf);
-    // BGR→RGB, (pixel − 127.5) / 128  [InsightFace buffalo_l/sc Normalisierung]
-    let mut input = vec![0f32; 3 * in_h * in_w];
-    for y in 0..in_h {
-        for x in 0..in_w {
-            let s = (y * in_w + x) * 3;
-            input[y * in_w + x]                   = (buf[s + 2] as f32 - 127.5) / 128.0;
-            input[in_h * in_w + y * in_w + x]     = (buf[s + 1] as f32 - 127.5) / 128.0;
-            input[2 * in_h * in_w + y * in_w + x] = (buf[s]     as f32 - 127.5) / 128.0;
-        }
-    }
-    input
-}
-
 /// Rechteckiger Bildausschnitt in Frame-Koordinaten.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Region {
@@ -84,16 +68,15 @@ pub fn tile_regions(fw: usize, fh: usize, cols: usize, rows: usize, overlap: f32
         .collect()
 }
 
-/// Skaliert `region` seitenverhältnistreu in ein `size` × `size`-Quadrat (Rand grau wie beim YOLO-Training)
-/// und liefert den Eingang als RGB-CHW-Tensor mit Werten 0–1.
-pub fn letterbox_yolo(frame: &[u8], fw: usize, region: &Region, size: usize, buf: &mut [u8]) -> (Vec<f32>, Letterbox) {
+/// Skaliert `region` seitenverhältnistreu in ein `size` × `size`-Quadrat (BGR, Rand mit `pad`).
+fn letterbox_into(frame: &[u8], fw: usize, region: &Region, size: usize, pad: u8, buf: &mut [u8]) -> Letterbox {
     let scale = (size as f32 / region.w as f32).min(size as f32 / region.h as f32);
     let nw = ((region.w as f32 * scale).round() as usize).clamp(1, size);
     let nh = ((region.h as f32 * scale).round() as usize).clamp(1, size);
     let pad_x = (size - nw) / 2;
     let pad_y = (size - nh) / 2;
 
-    buf[..size * size * 3].fill(114);
+    buf[..size * size * 3].fill(pad);
     for dy in 0..nh {
         let sy = region.y0 + (dy * region.h / nh).min(region.h - 1);
         for dx in 0..nw {
@@ -103,16 +86,32 @@ pub fn letterbox_yolo(frame: &[u8], fw: usize, region: &Region, size: usize, buf
             buf[d..d + 3].copy_from_slice(&frame[s..s + 3]);
         }
     }
+    Letterbox { scale, pad_x: pad_x as f32, pad_y: pad_y as f32 }
+}
 
+/// BGR-Puffer → RGB-CHW-Tensor mit `(wert - mean) / std`.
+fn to_rgb_chw(buf: &[u8], size: usize, mean: f32, std: f32) -> Vec<f32> {
     let n = size * size;
     let mut input = vec![0f32; 3 * n];
     for i in 0..n {
         let s = i * 3;
-        input[i]         = buf[s + 2] as f32 / 255.0;
-        input[n + i]     = buf[s + 1] as f32 / 255.0;
-        input[2 * n + i] = buf[s]     as f32 / 255.0;
+        input[i]         = (buf[s + 2] as f32 - mean) / std;
+        input[n + i]     = (buf[s + 1] as f32 - mean) / std;
+        input[2 * n + i] = (buf[s]     as f32 - mean) / std;
     }
-    (input, Letterbox { scale, pad_x: pad_x as f32, pad_y: pad_y as f32 })
+    input
+}
+
+/// YOLO-Eingang: Rand grau (wie beim Training), Werte 0–1.
+pub fn letterbox_yolo(frame: &[u8], fw: usize, region: &Region, size: usize, buf: &mut [u8]) -> (Vec<f32>, Letterbox) {
+    let lb = letterbox_into(frame, fw, region, size, 114, buf);
+    (to_rgb_chw(buf, size, 0.0, 255.0), lb)
+}
+
+/// SCRFD-Eingang (InsightFace): Rand schwarz, Werte (x − 127,5) / 128.
+pub fn letterbox_scrfd(frame: &[u8], fw: usize, region: &Region, size: usize, buf: &mut [u8]) -> (Vec<f32>, Letterbox) {
+    let lb = letterbox_into(frame, fw, region, size, 0, buf);
+    (to_rgb_chw(buf, size, 127.5, 128.0), lb)
 }
 
 fn resize_bgr_into(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize, dst: &mut [u8]) {

@@ -126,14 +126,41 @@ fn extract_onnx_from_zip(
 ) -> Result<()> {
     let zfile = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(zfile)?;
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
-        let name = entry.name().to_owned();
-        if name.ends_with(".onnx") && !name.contains("__MACOSX") {
-            let mut out = std::fs::File::create(target_tmp)?;
-            std::io::copy(&mut entry, &mut out)?;
-            return Ok(());
-        }
+    let names: Vec<String> = archive.file_names().map(String::from).collect();
+    let Some(name) = choose_onnx(&names) else {
+        anyhow::bail!("Keine .onnx-Datei im ZIP-Archiv gefunden");
+    };
+    let mut entry = archive.by_name(&name)?;
+    let mut out = std::fs::File::create(target_tmp)?;
+    std::io::copy(&mut entry, &mut out)?;
+    Ok(())
+}
+
+/// InsightFace-Pakete (buffalo_l, buffalo_sc) enthalten mehrere Modelle – der Gesichtsdetektor heißt `det_*.onnx`.
+/// Ohne solchen Eintrag wird die einzige bzw. erste ONNX-Datei genommen.
+fn choose_onnx(names: &[String]) -> Option<String> {
+    let onnx: Vec<&String> = names.iter().filter(|n| n.ends_with(".onnx") && !n.contains("__MACOSX")).collect();
+    let basename = |n: &str| n.rsplit('/').next().unwrap_or(n).to_owned();
+    onnx.iter().find(|n| basename(n).starts_with("det_")).or_else(|| onnx.first()).map(|n| n.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::choose_onnx;
+
+    #[test]
+    fn aus_buffalo_wird_der_detektor_gewaehlt() {
+        let names: Vec<String> = ["genderage.onnx", "2d106det.onnx", "det_10g.onnx", "1k3d68.onnx", "w600k_r50.onnx"]
+            .iter().map(|s| s.to_string()).collect();
+        assert_eq!(choose_onnx(&names).as_deref(), Some("det_10g.onnx"));
+        let sc: Vec<String> = ["buffalo_sc/w600k_mbf.onnx", "buffalo_sc/det_500m.onnx"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(choose_onnx(&sc).as_deref(), Some("buffalo_sc/det_500m.onnx"));
     }
-    anyhow::bail!("Keine .onnx-Datei im ZIP-Archiv gefunden")
+
+    #[test]
+    fn ohne_detektor_die_erste_onnx() {
+        let names: Vec<String> = ["readme.txt", "__MACOSX/x.onnx", "plates.onnx"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(choose_onnx(&names).as_deref(), Some("plates.onnx"));
+        assert_eq!(choose_onnx(&["a.txt".to_string()]), None);
+    }
 }
